@@ -56,12 +56,14 @@
 #define XON_RETRIES               10         /**<  Num or XON retries before declaring link dead */
 #define ACK_DELAY_MS              10         /**<  Ms of delay before sending acks */
 #define XON_THRESHOLD             4          /**<  Min number of empty slots in rx buffer necessary to send XON */
+#define CLOSING_TIMEOUT           4000       /**< Max num of ms to wait for channel to stay in CLOSING state before being forced to CLOSED */
 
 namespace ajn {
 
 /* Forward Declaration */
 class PacketEngine;
 struct DelayAckAlarmContext;
+struct ClosingAlarmContext;
 
 /**
  * PacketEngineListener provides connect/accept/disconnect event information to PacketEngine users.
@@ -128,6 +130,7 @@ class PacketEngine : public qcc::AlarmListener {
         qcc::Alarm disconnectRspAlarm;
         qcc::Alarm xOnAlarm;
         DelayAckAlarmContext* ackAlarmContext;
+        ClosingAlarmContext* closingAlarmContext;
         bool isAckAlarmArmed;
 
         Packet**   rxPackets;
@@ -217,6 +220,8 @@ class PacketEngine : public qcc::AlarmListener {
 
     QStatus Connect(const PacketDest& dest, PacketStream& packetStream, PacketEngineListener& listener, void* context);
 
+    PacketStream* GetPacketStream(const PacketEngineStream& stream);
+
     /**
      * Request graceful disconnect of stream.
      * Note taht stream is not actually disconnected until PacketEngineDisconnectCB is called.
@@ -245,6 +250,7 @@ class PacketEngine : public qcc::AlarmListener {
     std::map<uint32_t, ChannelInfo> channelInfos;
     uint32_t maxWindowSize;
     bool isRunning;
+    bool rxPacketThreadReload;
 
     ChannelInfo* CreateChannelInfo(uint32_t chanId, const PacketDest& dest, PacketStream& packetStream, PacketEngineListener& listener, uint16_t windowSize);
 

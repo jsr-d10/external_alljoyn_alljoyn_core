@@ -353,12 +353,6 @@ int main(int argc, char** argv)
     bool waitForSigint = false;
     bool roundtrip = false;
 
-#ifdef _WIN32
-    WSADATA wsaData;
-    WORD version = MAKEWORD(2, 0);
-    int error = WSAStartup(version, &wsaData);
-#endif
-
     printf("AllJoyn Library version: %s\n", ajn::GetVersion());
     printf("AllJoyn Library build info: %s\n", ajn::GetBuildInfo());
 
@@ -815,11 +809,13 @@ int main(int argc, char** argv)
                 MsgArg val;
                 status = remoteObj.GetProperty(::org::alljoyn::alljoyn_test::values::InterfaceName, "int_val", val);
                 if (ER_OK == status) {
-                    QCC_SyncPrintf("%s.%s ( path=%s) returned \"%s\"\n",
+                    int iVal = 0;
+                    val.Get("i", &iVal);
+                    QCC_SyncPrintf("%s.%s ( path=%s) returned \"%d\"\n",
                                    g_wellKnownName.c_str(),
                                    "GetProperty",
                                    ::org::alljoyn::alljoyn_test::ObjectPath,
-                                   val.ToString().c_str());
+                                   iVal);
                 } else {
                     QCC_LogError(status, ("GetProperty on %s failed", g_wellKnownName.c_str()));
                 }

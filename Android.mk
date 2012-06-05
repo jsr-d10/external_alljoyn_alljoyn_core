@@ -91,8 +91,9 @@ LOCAL_SRC_FILES += \
 	src/MsgArg.cc \
 	src/NullTransport.cc \
 	src/PeerState.cc \
-	src/PermissionDB.cc \
-	src/PersistGUID.cc \
+	src/ProtectedBusListener.cc \
+	src/ProtectedSessionListener.cc \
+	src/ProtectedSessionPortListener.cc \
 	src/ProxyBusObject.cc \
 	src/RemoteEndpoint.cc \
 	src/SASLEngine.cc \
@@ -103,7 +104,9 @@ LOCAL_SRC_FILES += \
 	src/Transport.cc \
 	src/TransportList.cc \
 	src/XmlHelper.cc \
-	src/posix/ClientTransport.cc
+	src/posix/ClientTransport.cc \
+	src/posix/android/PermissionDB.cc
+
 
 LOCAL_SRC_FILES += \
 	autogen/Status.c \
@@ -157,8 +160,8 @@ LOCAL_SRC_FILES := \
 	daemon/BTTransport.cc \
 	daemon/Bus.cc \
 	daemon/BusController.cc \
-	daemon/ConfigDB.cc \
 	daemon/DBusObj.cc \
+	daemon/DaemonConfig.cc \
 	daemon/DaemonRouter.cc \
 	daemon/DaemonTransport.cc \
 	daemon/NameService.cc \
@@ -169,10 +172,7 @@ LOCAL_SRC_FILES := \
 	daemon/PacketEngine.cc \
 	daemon/PacketEngineStream.cc \
 	daemon/PacketPool.cc \
-	daemon/PolicyDB.cc \
-	daemon/PropertyDB.cc \
 	daemon/RuleTable.cc \
-	daemon/ServiceDB.cc \
 	daemon/TCPTransport.cc \
 	daemon/VirtualEndpoint.cc \
 	daemon/bt_bluez/AdapterObject.cc \
@@ -189,6 +189,7 @@ LOCAL_SRC_FILES := \
 	daemon/ice/ICEManager.cc \
 	daemon/ice/ICESession.cc \
 	daemon/ice/ICEStream.cc \
+	daemon/ice/PersistGUID.cc \
 	daemon/ice/ProximityScanEngine.cc \
 	daemon/ice/RendezvousServerConnection.cc \
 	daemon/ice/RendezvousServerInterface.cc \
@@ -242,4 +243,70 @@ LOCAL_MODULE := alljoyn-daemon
 
 include $(BUILD_EXECUTABLE)
 
+# Rules to build libAllJoynAndroidExt.so
+include $(CLEAR_VARS)
+LOCAL_CPP_EXTENSION := .cpp
+
+# NOTE1: flag "-Wno-psabi" removes warning about GCC 4.4 va_list warning
+# NOTE2: flag "-Wno-write-strings" removes warning about deprecated conversion
+#        from string constant to char*
+#
+LOCAL_CFLAGS := \
+	-Wno-psabi \
+	-Wno-write-strings \
+	-DQCC_CPU_ARM \
+	-DQCC_OS_ANDROID \
+	-DQCC_OS_GROUP_POSIX
+
+LOCAL_C_INCLUDES := \
+	external/alljoyn/alljoyn_core/alljoyn_android/alljoyn_android_ext/jni \
+	external/alljoyn/alljoyn_core/autogen \
+	external/alljoyn/alljoyn_core/inc \
+	external/alljoyn/alljoyn_core/JSON \
+	external/alljoyn/common/inc \
+	external/alljoyn/common/inc/qcc \
+	external/connectivity/stlport/stlport \
+	external/openssl/include \
+
+LOCAL_SRC_FILES := \
+	alljoyn_android/alljoyn_android_ext/jni/AllJoynAndroidExt.cpp
+
+LOCAL_SHARED_LIBRARIES := \
+	liballjoyn \
+	libcrypto \
+	libssl \
+	liblog
+
+LOCAL_REQUIRED_MODULES := \
+	external/alljoyn/alljoyn_core/liballjoyn \
+	external/openssl/crypto/libcrypto \
+	external/openssl/ssl/libssl \
+	external/connectivity/stlport
+
+LOCAL_MODULE_TAGS := optional
+LOCAL_MODULE := libAllJoynAndroidExt
+
+LOCAL_ARM_MODE := arm
+
+include $(BUILD_SHARED_LIBRARY)
+
+# Rules to build AllJoynAndroidExt.apk
+include $(CLEAR_VARS)
+include $(CLEAR_VARS)
+LOCAL_PATH := $(LOCAL_PATH)/alljoyn_android/alljoyn_android_ext
+LOCAL_MODULE_TAGS := optional
+
+#LOCAL_SRC_FILES := $(call all-subdir-java-files)
+LOCAL_SRC_FILES := \
+	src/org/alljoyn/jni/AllJoynAndroidExt.java \
+	src/org/alljoyn/jni/ScanResultMessage.java \
+	src/org/alljoyn/jni/ScanResultsReceiver.java
+
+
+
+LOCAL_PACKAGE_NAME := AllJoynAndroidExt
+LOCAL_CERTIFICATE := platform
+LOCAL_JNI_SHARED_LIBRARIES := libAllJoynAndroidExt
+
+include $(BUILD_PACKAGE)
 

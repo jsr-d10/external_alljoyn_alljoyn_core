@@ -514,7 +514,11 @@ typedef enum _ResponseType {
     /**
      * The address candidate response
      */
-    ADDRESS_CANDIDATES_RESPONSE
+    ADDRESS_CANDIDATES_RESPONSE,
+    /**
+     * The start ICE checks response
+     */
+    START_ICE_CHECKS_RESPONSE
 } ResponseType;
 
 /**
@@ -617,6 +621,18 @@ class SearchMatchResponse : public InterfaceResponse {
      */
     STUNServerInfo STUNInfo;
 
+};
+
+/**
+ * The StartICEChecks response structure received from the Rendezvous Server.
+ */
+class StartICEChecksResponse : public InterfaceResponse {
+  public:
+    /**
+     * The peerAddress of the remote daemon running the client that received the
+     * address candidates from this daemon.
+     */
+    String peerAddr;
 };
 
 /**
@@ -834,6 +850,16 @@ typedef struct _ClientLoginFinalResponse {
     String peerID;
 
     /**
+     * Boolean indicating if a valid peerAddr is present in the response.
+     */
+    bool peerAddrPresent;
+
+    /**
+     * Peer identifier used by the daemon for Rendezvous Session.
+     */
+    String peerAddr;
+
+    /**
      * Boolean indicating if a valid daemonRegistrationRequired is present in the response.
      */
     bool daemonRegistrationRequiredPresent;
@@ -866,6 +892,11 @@ typedef struct _ClientLoginFinalResponse {
     void SetpeerID(String peerid) {
         peerIDPresent = true;
         peerID = peerid;
+    }
+
+    void SetpeerAddr(String peeraddr) {
+        peerAddrPresent = true;
+        peerAddr = peeraddr;
     }
 
     void SetdaemonRegistrationRequired(bool value) {

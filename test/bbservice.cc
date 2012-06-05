@@ -20,6 +20,10 @@
  ******************************************************************************/
 #include <qcc/platform.h>
 
+#ifdef _WIN32
+#include <Crtdbg.h>
+#endif
+
 #include <assert.h>
 #include <signal.h>
 #include <stdio.h>
@@ -517,14 +521,15 @@ class LocalTestObject : public BusObject {
 
     void Ping(const InterfaceDescription::Member* member, Message& msg)
     {
-
+        char* value = NULL;
         /* Reply with same string that was sent to us */
-        MsgArg arg(*(msg->GetArg(0)));
-        printf("Pinged with: %s\n", msg->GetArg(0)->ToString().c_str());
+        const MsgArg* arg((msg->GetArg(0)));
+        arg->Get("s", &value);
+        printf("Pinged with: %s\n", value);
         if (msg->IsEncrypted()) {
             printf("Authenticated using %s\n", msg->GetAuthMechanism().c_str());
         }
-        QStatus status = MethodReply(msg, &arg, 1);
+        QStatus status = MethodReply(msg, arg, 1);
         if (ER_OK != status) {
             QCC_LogError(status, ("Ping: Error sending reply"));
         }
@@ -642,16 +647,13 @@ static void usage(void)
 /** Main entry point */
 int main(int argc, char** argv)
 {
+#ifdef _WIN32
+    _CrtMemDumpAllObjectsSince(NULL);
+#endif
     QStatus status = ER_OK;
     unsigned long reportInterval = 1000;
     const char* keyStore = NULL;
     SessionOpts opts(SessionOpts::TRAFFIC_MESSAGES, false, SessionOpts::PROXIMITY_ANY, TRANSPORT_NONE);
-
-#ifdef _WIN32
-    WSADATA wsaData;
-    WORD version = MAKEWORD(2, 0);
-    int error = WSAStartup(version, &wsaData);
-#endif
 
     printf("AllJoyn Library version: %s\n", ajn::GetVersion());
     printf("AllJoyn Library build info: %s\n", ajn::GetBuildInfo());

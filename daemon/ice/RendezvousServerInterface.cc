@@ -157,6 +157,10 @@ String PrintResponseType(ResponseType type)
         retStr = String("ADDRESS_CANDIDATES_RESPONSE");
         break;
 
+    case START_ICE_CHECKS_RESPONSE:
+        retStr = String("START_ICE_CHECKS_RESPONSE");
+        break;
+
     case INVALID_RESPONSE:
     default:
         break;
@@ -534,6 +538,13 @@ void PrintMessageResponse(Response msg)
             }
         }
 
+    } else if (msg.type == START_ICE_CHECKS_RESPONSE) {
+
+        StartICEChecksResponse* StartICEChecks = static_cast<StartICEChecksResponse*>(msg.response);
+        StartICEChecksResponse startICEChecks = *StartICEChecks;
+        QCC_DbgPrintf(("PrintMessageResponse(): Start ICE Checks Response"));
+        QCC_DbgPrintf(("startICEChecks[peerAddr] = %s", startICEChecks.peerAddr.c_str()));
+
     } else {
 
         QCC_LogError(ER_FAIL, ("PrintMessageResponse(): Invalid Response"));
@@ -579,6 +590,7 @@ QStatus ParseMessagesResponse(Json::Value receivedResponse, ResponseMessage& par
     Json::StaticString deleteAll("deleteAll");
     Json::StaticString foundation("foundation");
     Json::StaticString componentID("componentID");
+    Json::StaticString startICEChecks("startICEChecks");
 
     Response tempMsg;
 
@@ -971,6 +983,30 @@ QStatus ParseMessagesResponse(Json::Value receivedResponse, ResponseMessage& par
                             status = ER_FAIL;
                             QCC_LogError(status, ("ParseMessagesResponse(): matchRevoked member not found"));
                         }
+                    } else if (msgsObjArrayMember[type] == "startICEChecks") {
+                        QCC_DbgPrintf(("ParseMessagesResponse(): [%d] Start ICE Checks Message", j));
+
+                        if (msgsObjArrayMember.isMember(startICEChecks)) {
+                            Json::Value startICEChecksObj = msgsObjArrayMember[startICEChecks];
+
+                            if (startICEChecksObj.isMember(peerAddr)) {
+                                tempMsg.type = START_ICE_CHECKS_RESPONSE;
+                                StartICEChecksResponse* StartICEChecks = new StartICEChecksResponse();
+                                StartICEChecks->peerAddr = String(startICEChecksObj[peerAddr].asCString());
+
+                                tempMsg.response = static_cast<StartICEChecksResponse*>(StartICEChecks);
+                                parsedResponse.msgs.push_back(tempMsg);
+                                PrintMessageResponse(tempMsg);
+
+                            } else {
+                                status = ER_FAIL;
+                                QCC_LogError(status, ("ParseMessagesResponse(): startICEChecks[peerAddr] member not found"));
+                            }
+
+                        } else {
+                            status = ER_FAIL;
+                            QCC_LogError(status, ("ParseMessagesResponse(): startICEChecks member not found"));
+                        }
                     } else {
                         status = ER_FAIL;
                         QCC_LogError(status, ("ParseMessagesResponse(): Unrecognized Message Response received from Rendezvous Server"));
@@ -1077,6 +1113,7 @@ QStatus ParseClientLoginFinalResponse(Json::Value receivedResponse, ClientLoginF
 
     Json::StaticString message("message");
     Json::StaticString peerID("peerID");
+    Json::StaticString peerAddr("peerAddr");
     Json::StaticString daemonRegistrationRequired("daemonRegistrationRequired");
     Json::StaticString sessionActive("sessionActive");
     Json::StaticString configData("configData");
@@ -1089,50 +1126,60 @@ QStatus ParseClientLoginFinalResponse(Json::Value receivedResponse, ClientLoginF
 
 
         if (receivedResponse.isMember(peerID)) {
+            if (receivedResponse.isMember(peerAddr)) {
+                if (receivedResponse.isMember(configData)) {
 
-            parsedResponse.SetpeerID(String(receivedResponse[peerID].asCString()));
-            QCC_DbgPrintf(("ParseClientLoginFinalResponse(): peerID = %s", receivedResponse[peerID].asCString()));
+                    parsedResponse.SetpeerID(String(receivedResponse[peerID].asCString()));
+                    QCC_DbgPrintf(("ParseClientLoginFinalResponse(): peerID = %s", receivedResponse[peerID].asCString()));
 
-        }
+                    parsedResponse.SetpeerAddr(String(receivedResponse[peerAddr].asCString()));
+                    QCC_DbgPrintf(("ParseClientLoginFinalResponse(): peerAddr = %s", receivedResponse[peerAddr].asCString()));
 
-        if (receivedResponse.isMember(daemonRegistrationRequired)) {
+                    Json::Value configDataObj = receivedResponse[configData];
 
-            parsedResponse.SetdaemonRegistrationRequired(receivedResponse[daemonRegistrationRequired].asBool());
-            QCC_DbgPrintf(("ParseClientLoginFinalResponse(): daemonRegistrationRequired = %d", receivedResponse[daemonRegistrationRequired].asBool()));
+                    if (configDataObj.isMember(Tkeepalive)) {
 
-        } else {
+                        ConfigData data;
+                        data.SetTkeepalive(configDataObj[Tkeepalive].asInt());
+                        parsedResponse.SetconfigData(data);
+                        QCC_DbgPrintf(("ParseClientLoginFinalResponse(): configData.Tkeepalive = %d", configDataObj[Tkeepalive].asInt()));
 
-            parsedResponse.SetdaemonRegistrationRequired(false);
-            QCC_DbgPrintf(("ParseClientLoginFinalResponse(): Set daemonRegistrationRequired to false as Server did not send the field"));
+                        if (receivedResponse.isMember(daemonRegistrationRequired)) {
 
-        }
+                            parsedResponse.SetdaemonRegistrationRequired(receivedResponse[daemonRegistrationRequired].asBool());
+                            QCC_DbgPrintf(("ParseClientLoginFinalResponse(): daemonRegistrationRequired = %d", receivedResponse[daemonRegistrationRequired].asBool()));
 
-        if (receivedResponse.isMember(sessionActive)) {
+                        } else {
 
-            parsedResponse.SetsessionActive(receivedResponse[sessionActive].asBool());
-            QCC_DbgPrintf(("ParseClientLoginFinalResponse(): sessionActive = %d", receivedResponse[sessionActive].asBool()));
+                            parsedResponse.SetdaemonRegistrationRequired(false);
+                            QCC_DbgPrintf(("ParseClientLoginFinalResponse(): Set daemonRegistrationRequired to false as Server did not send the field"));
 
-        } else {
+                        }
 
-            parsedResponse.SetsessionActive(false);
-            QCC_DbgPrintf(("ParseClientLoginFinalResponse(): Set sessionActive to false as Server did not send the field"));
+                        if (receivedResponse.isMember(sessionActive)) {
 
-        }
+                            parsedResponse.SetsessionActive(receivedResponse[sessionActive].asBool());
+                            QCC_DbgPrintf(("ParseClientLoginFinalResponse(): sessionActive = %d", receivedResponse[sessionActive].asBool()));
 
-        if (receivedResponse.isMember(configData)) {
+                        } else {
 
-            Json::Value configDataObj = receivedResponse[configData];
+                            parsedResponse.SetsessionActive(false);
+                            QCC_DbgPrintf(("ParseClientLoginFinalResponse(): Set sessionActive to false as Server did not send the field"));
 
-            if (configDataObj.isMember(Tkeepalive)) {
-                ConfigData data;
-                data.SetTkeepalive(configDataObj[Tkeepalive].asInt());
-                parsedResponse.SetconfigData(data);
-                QCC_DbgPrintf(("ParseClientLoginFinalResponse(): configData.Tkeepalive = %d", configDataObj[Tkeepalive].asInt()));
+                        }
+
+                    } else {
+                        status = ER_FAIL;
+                        QCC_LogError(status, ("ParseClientLoginFinalResponse(): configData member in the message does not seem to have the Tkeepalive field"));
+                    }
+                } else {
+                    status = ER_FAIL;
+                    QCC_LogError(status, ("ParseClientLoginFinalResponse(): configData member not found"));
+                }
             } else {
                 status = ER_FAIL;
-                QCC_LogError(status, ("ParseClientLoginFinalResponse(): configData member in the message does not seem to have the Tkeepalive field"));
+                QCC_LogError(status, ("ParseClientLoginFinalResponse(): peerAddr member not found"));
             }
-
         }
 
     } else {

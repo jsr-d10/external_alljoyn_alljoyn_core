@@ -446,17 +446,10 @@ int main(int argc, char** argv)
     bool doStress = false;
     bool useSignalHandler = false;
     bool discoverRemote = false;
-    unsigned int pid;
     unsigned long signalDelay = 0;
     unsigned long disconnectDelay = 0;
     unsigned long reportInterval = 1000;
     unsigned long maxSignals = 1000000;
-
-#ifdef _WIN32
-    WSADATA wsaData;
-    WORD version = MAKEWORD(2, 0);
-    int error = WSAStartup(version, &wsaData);
-#endif
 
     printf("AllJoyn Library version: %s\n", ajn::GetVersion());
     printf("AllJoyn Library build info: %s\n", ajn::GetBuildInfo());
@@ -719,9 +712,8 @@ int main(int argc, char** argv)
         }
 
         /* Clean up msg bus for next stress loop iteration*/
-        BusAttachment* deleteMe = g_msgBus;
+        delete g_msgBus;
         g_msgBus = NULL;
-        delete deleteMe;
 
         /* Clean up the test object for the next stress loop iteration */
         delete testObj;
@@ -732,8 +724,8 @@ int main(int argc, char** argv)
 
     if (g_msgBus) {
         BusAttachment* deleteMe = g_msgBus;
-        g_msgBus = NULL;
         delete deleteMe;
+        g_msgBus = NULL;
     }
 
     QCC_SyncPrintf("bbsig exiting with %d (%s)\n", status, QCC_StatusText(status));

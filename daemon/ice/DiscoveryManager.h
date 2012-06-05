@@ -52,8 +52,9 @@
 
 using namespace qcc;
 
+// PPN - Disable Proximity Scanner for 8960 FC
 #if defined(QCC_OS_ANDROID)
-#define ENABLE_PROXIMITY_FRAMEWORK
+//#define ENABLE_PROXIMITY_FRAMEWORK
 #endif
 
 // PPN - Uncomment this for enabling the support to stop the proximity scanning when disconnected from the
@@ -75,44 +76,6 @@ class DiscoveryManager : public Thread, public AlarmListener {
   public:
     //friend class ProximityScanEngine;
     BusAttachment& bus;
-
-    /**
-     * @brief The module name of the Discovery Manager, for use in the configuration
-     * database.
-     */
-    static const char* MODULE_NAME;
-
-    /**
-     * @brief The property name used to define the interfaces (e.g., eth0) used
-     * in discovery.
-     */
-    static const char* INTERFACES_PROPERTY;
-
-    /**
-     * @brief The name of the property used to configure the Rendezvous Server address to which the
-     * Discovery Manager should connect.
-     */
-    static const char* RENDEZVOUS_SERVER_PROPERTY;
-
-    /**
-     * @brief The name of the property used to configure the Ethernet interface name prefix.
-     */
-    static const char* ETHERNET_INTERFACE_NAME_PREFIX_PROPERTY;
-
-    /**
-     * @brief The name of the property used to configure the Wi-Fi interface name prefix.
-     */
-    static const char* WIFI_INTERFACE_NAME_PREFIX_PROPERTY;
-
-    /**
-     * @brief The name of the property used to configure the Mobile network interface name prefix.
-     */
-    static const char* MOBILE_NETWORK_INTERFACE_NAME_PREFIX_PROPERTY;
-
-    /**
-     * @brief The name of the property used to configure the connection protocol.
-     */
-    static const char* CONNECTION_PROTOCOL_PROPERTY;
 
     /**
      * @brief Returns the interface name prefixes.
@@ -475,9 +438,9 @@ class DiscoveryManager : public Thread, public AlarmListener {
         // Using this function to print the hard-coded proximity message
         GenerateJSONProximity(proximity[0]);
 
-        wifi.BSSID = String("b2");
-        wifi.SSID = String("b2");
-        bt.MAC = String("b2");
+        wifi.BSSID = String("a1");
+        wifi.SSID = String("a1");
+        bt.MAC = String("a1");
 
         proximity[1].wifiaps.push_back(wifi);
         proximity[1].BTs.push_back(bt);
@@ -485,9 +448,9 @@ class DiscoveryManager : public Thread, public AlarmListener {
         // Using this function to print the hard-coded proximity message
         GenerateJSONProximity(proximity[1]);
 
-        wifi.BSSID = String("c3");
-        wifi.SSID = String("c3");
-        bt.MAC = String("c3");
+        wifi.BSSID = String("a1");
+        wifi.SSID = String("a1");
+        bt.MAC = String("a1");
 
         proximity[2].wifiaps.push_back(wifi);
         proximity[2].BTs.push_back(bt);
@@ -623,6 +586,12 @@ class DiscoveryManager : public Thread, public AlarmListener {
 
     /**
      * @internal
+     * @brief Handle the Start ICE Checks Response message.
+     */
+    QStatus HandleStartICEChecksResponse(StartICEChecksResponse response);
+
+    /**
+     * @internal
      * @brief Handle the Match Revoked Response message.
      */
     QStatus HandleMatchRevokedResponse(MatchRevokedResponse response);
@@ -734,6 +703,12 @@ class DiscoveryManager : public Thread, public AlarmListener {
      */
     void SetDisconnectEvent(void) { DisconnectEvent.SetEvent(); };
 
+    /**
+     * @internal
+     * @brief Return the PeerAddr
+     */
+    qcc::String GetPeerAddr(void) { return PeerAddr; };
+
   private:
 
     /**
@@ -827,9 +802,16 @@ class DiscoveryManager : public Thread, public AlarmListener {
     /**
      * @internal
      *
-     * @brief Rendezvous server address.
+     * @brief Peer ID assigned for this daemon.
      */
     String PeerID;
+
+    /**
+     * @internal
+     *
+     * @brief Peer Address assigned to this daemon.
+     */
+    String PeerAddr;
 
     /**
      * @internal

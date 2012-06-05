@@ -1,11 +1,21 @@
 
 
+#include <stdio.h>
 #include "Status.h"
 
 #define CASE(_status) case _status: return #_status 
     
 const char* QCC_StatusText(QStatus status)
 {
+#if defined(NDEBUG)
+    static char code[8];
+#ifdef _WIN32
+    _snprintf(code, sizeof(code), "0x%04x", status);
+#else
+    snprintf(code, sizeof(code), "0x%04x", status);
+#endif
+    return code;
+#else
     switch (status) {
         CASE(ER_OK);
         CASE(ER_FAIL);
@@ -278,4 +288,5 @@ const char* QCC_StatusText(QStatus status)
     default:
         return "<unknown>";
     }
+#endif
 }

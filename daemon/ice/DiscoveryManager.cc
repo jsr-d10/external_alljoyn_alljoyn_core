@@ -42,7 +42,7 @@
 
 #include "DiscoveryManager.h"
 #include "RendezvousServerInterface.h"
-#include "ConfigDB.h"
+#include "DaemonConfig.h"
 #include "ProximityScanEngine.h"
 #include "RendezvousServerConnection.h"
 
@@ -63,44 +63,16 @@ namespace ajn {
 // manager will use for discovery.
 //
 //   <busconfig>
-//     <alljoyn module="icedm">
+//     <ice_discovery_manager>
 //       <property interfaces="*"/>
-//     </alljoyn>
+//       <property server="rdvs-test.qualcomm.com"/>
+//       <property EthernetPrefix="eth"/>
+//       <property WiFiPrefix="wlan"/>
+//       <property MobileNwPrefix="ppp"/>
+//       <property Protocol="HTTP"/>
+//     </ice_discovery_manager>
 //   </busconfig>
 //
-const char* DiscoveryManager::MODULE_NAME = "icedm";
-
-//
-// The name of the property used to configure the interfaces over which the
-// Discovery Manager should run discovery.
-//
-const char* DiscoveryManager::INTERFACES_PROPERTY = "interfaces";
-
-//
-// The name of the property used to configure the Rendezvous Server address to which the
-// Discovery Manager should connect.
-//
-const char* DiscoveryManager::RENDEZVOUS_SERVER_PROPERTY = "server";
-
-//
-// The name of the property used to configure the Ethernet interface name prefix.
-//
-const char* DiscoveryManager::ETHERNET_INTERFACE_NAME_PREFIX_PROPERTY = "EthernetPrefix";
-
-//
-// The name of the property used to configure the Wi-Fi interface name prefix.
-//
-const char* DiscoveryManager::WIFI_INTERFACE_NAME_PREFIX_PROPERTY = "WiFiPrefix";
-
-//
-// The name of the property used to configure the Mobile network interface name prefix.
-//
-const char* DiscoveryManager::MOBILE_NETWORK_INTERFACE_NAME_PREFIX_PROPERTY = "MobileNwPrefix";
-
-/**
- * @brief The name of the property used to configure the connection protocol.
- */
-const char* DiscoveryManager::CONNECTION_PROTOCOL_PROPERTY = "Protocol";
 
 //
 // The value of the interfaces property used to configure the Discovery Manager
@@ -116,6 +88,7 @@ DiscoveryManager::DiscoveryManager(BusAttachment& bus)
     GetAccountNameMethod(String("GetClientAccountName")),
     GetAccountPasswordMethod(String("GetClientAccountPassword")),
     PeerID(),
+    PeerAddr(),
     DiscoveryManagerState(IMPL_SHUTDOWN),
     PersistentIdentifier(),
     InterfaceFlags(NONE),
@@ -146,34 +119,39 @@ DiscoveryManager::DiscoveryManager(BusAttachment& bus)
 {
     QCC_DbgPrintf(("DiscoveryManager::DiscoveryManager()\n"));
 
+    //
+    // There are configurable attributes of the Discovery Manager which are determined
+    // by the configuration database.  A module name is required and is defined
+    // here.  An example of how to use this is in setting the interfaces the discovery
+    // manager will use for discovery.
+    //
+    //   <busconfig>
+    //     <ice_discovery_manager>
+    //       <property interfaces="*"/>
+    //       <property server="rdvs-test.qualcomm.com"/>
+    //       <property EthernetPrefix="eth"/>
+    //       <property WiFiPrefix="wlan"/>
+    //       <property MobileNwPrefix="ppp"/>
+    //       <property Protocol="HTTP"/>
+    //     </ice_discovery_manager>
+    //   </busconfig>
+    //
+    DaemonConfig* config = DaemonConfig::Access();
+
     /* Retrieve the Rendezvous Server address from the config file */
-    RendezvousServer = ConfigDB::GetConfigDB()->GetProperty(DiscoveryManager::MODULE_NAME, DiscoveryManager::RENDEZVOUS_SERVER_PROPERTY);
-    if (RendezvousServer.size() == 0) {
-        // PPN - Change this to deployment server before release
-        RendezvousServer = String("rdvs-test.qualcomm.com");
-    }
+    // TODO PPN - Change this to deployment server before release
+    RendezvousServer = config->Get("ice_discovery_manager/property@server", "rdvs-test.qualcomm.com");
 
     /* Retrieve the connection protocol to be used */
-    if (ConfigDB::GetConfigDB()->GetProperty(DiscoveryManager::MODULE_NAME, DiscoveryManager::CONNECTION_PROTOCOL_PROPERTY) == String("HTTP")) {
+    if (config->Get("ice_discovery_manager/property@Protocol") == "HTTP") {
         QCC_DbgPrintf(("DiscoveryManager::DiscoveryManager(): Using HTTP"));
         UseHTTP = true;
     }
 
     /* Retrieve the interface name prefixes from the config file */
-    ethernetInterfaceName = ConfigDB::GetConfigDB()->GetProperty(DiscoveryManager::MODULE_NAME, DiscoveryManager::ETHERNET_INTERFACE_NAME_PREFIX_PROPERTY);
-    if (ethernetInterfaceName.size() == 0) {
-        ethernetInterfaceName = String("eth");
-    }
-
-    wifiInterfaceName = ConfigDB::GetConfigDB()->GetProperty(DiscoveryManager::MODULE_NAME, DiscoveryManager::WIFI_INTERFACE_NAME_PREFIX_PROPERTY);
-    if (wifiInterfaceName.size() == 0) {
-        wifiInterfaceName = String("wlan");
-    }
-
-    mobileNwInterfaceName = ConfigDB::GetConfigDB()->GetProperty(DiscoveryManager::MODULE_NAME, DiscoveryManager::MOBILE_NETWORK_INTERFACE_NAME_PREFIX_PROPERTY);
-    if (mobileNwInterfaceName.size() == 0) {
-        mobileNwInterfaceName = String("ppp");
-    }
+    ethernetInterfaceName = config->Get("ice_discovery_manager/property@EthernetPrefix", "eth");
+    wifiInterfaceName = config->Get("ice_discovery_manager/property@WiFiPrefix", "wlan");
+    mobileNwInterfaceName = config->Get("ice_discovery_manager/property@MobileNwPrefix", "ppp");
 
     QCC_DbgPrintf(("DiscoveryManager::DiscoveryManager(): RendezvousServer = %s\n", RendezvousServer.c_str()));
 
@@ -580,6 +558,26 @@ QStatus DiscoveryManager::CancelAdvertiseOrLocate(bool cancelAdvertise, const St
 
     for (it = tempMap->begin(); it != tempMap->end(); it++) {
         if (it->first == name) {
+
+            // Send Found callback to AllJoynObj.cc to remove all the names that we discovered corresponding
+            // to this Search from the nameMap
+            list<ServiceInfo>* responseInfo = &(it->second.response);
+            list<ServiceInfo>::iterator candidate_it;
+
+            for (candidate_it = responseInfo->begin(); candidate_it != responseInfo->end(); candidate_it++) {
+                vector<String> wkn;
+                wkn.push_back(candidate_it->serviceName);
+                if (!wkn.empty()) {
+                    if (iceCallback) {
+
+                        QCC_DbgPrintf(("DiscoveryManager::CancelAdvertiseOrLocate(): Trying to invoke the iceCallback to clear %s with GUID %s from nameMap\n",
+                                       candidate_it->serviceName.c_str(), candidate_it->serviceDaemonGUID.c_str()));
+
+                        (*iceCallback)(FOUND, String(), candidate_it->serviceDaemonGUID, &wkn, 0);
+                    }
+                }
+            }
+
             //
             // Delete the entry
             //
@@ -763,7 +761,7 @@ void DiscoveryManager::RemoveSessionDetailFromMap(bool client, std::pair<String,
         DiscoveryManagerMutex.Unlock(MUTEX_CONTEXT);
     } else {
         DiscoveryManagerMutex.Lock(MUTEX_CONTEXT);
-        for (it = IncomingICESessions.begin(); it != IncomingICESessions.end(); it++) {
+        for (it = IncomingICESessions.begin(); it != IncomingICESessions.end();) {
 
             if ((it->first == sessionDetail.first) && ((it->second).destinationName == sessionDetail.second.destinationName) && ((it->second).remotePeerAddress == sessionDetail.second.remotePeerAddress)) {
                 IncomingICESessions.erase(it++);
@@ -1610,6 +1608,17 @@ QStatus DiscoveryManager::HandleSearchMatchResponse(SearchMatchResponse response
     return status;
 }
 
+QStatus DiscoveryManager::HandleStartICEChecksResponse(StartICEChecksResponse response)
+{
+    QCC_DbgPrintf(("DiscoveryManager::HandleStartICEChecksResponse(): peerAddr = %s\n", response.peerAddr.c_str()));
+
+    QStatus status = ER_OK;
+
+    // PPN - Add code to handle the StartICEChecks Response
+
+    return status;
+}
+
 QStatus DiscoveryManager::HandleMatchRevokedResponse(MatchRevokedResponse response)
 {
 
@@ -1959,6 +1968,18 @@ QStatus DiscoveryManager::HandlePersistentMessageResponse(Json::Value payload)
                     if (ER_OK != HandleAddressCandidatesResponse(*AddressCandidates)) {
                         status = ER_INVALID_PERSISTENT_CONNECTION_MESSAGE_RESPONSE;
                         QCC_LogError(status, ("DiscoveryManager::HandlePersistentMessageResponse(): Received an erroneous address candidates response"));
+                    }
+                }
+                //
+                // Start ICE checks response has been received.
+                // Handle it accordingly.
+                //
+                else if (resp_it->type ==  START_ICE_CHECKS_RESPONSE) {
+                    StartICEChecksResponse* StartICEChecks = static_cast<StartICEChecksResponse*>(resp_it->response);
+
+                    if (ER_OK != HandleStartICEChecksResponse(*StartICEChecks)) {
+                        status = ER_INVALID_PERSISTENT_CONNECTION_MESSAGE_RESPONSE;
+                        QCC_LogError(status, ("DiscoveryManager::HandlePersistentMessageResponse(): Received an erroneous start ICE checks response"));
                     }
                 }
             } else {
@@ -2556,8 +2577,9 @@ void DiscoveryManager::HandleSuccessfulClientAuthentication(ClientLoginFinalResp
 {
     QCC_DbgPrintf(("DiscoveryManager::HandleSuccessfulClientAuthentication()"));
 
-    /* Set the PeerID */
+    /* Set the PeerID and PeerAddr */
     PeerID = response.peerID;
+    PeerAddr = response.peerAddr;
 
     if (response.daemonRegistrationRequired) {
         /* Set the RegisterDaemonWithServer flag so that the DiscoveryManager thread may
