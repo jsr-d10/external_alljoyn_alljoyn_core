@@ -69,6 +69,48 @@ Packet::Packet(size_t _mtu) :
 {
 }
 
+Packet::Packet(const Packet& other) :
+    chanId(other.chanId),
+    seqNum(other.seqNum),
+    gap(other.gap),
+    flags(other.flags),
+    payloadLen(other.payloadLen),
+    payload(other.payload),
+    buffer(new uint32_t[(other.mtu + sizeof(uint32_t) - 1) / sizeof(uint32_t)]),
+    expireTs(other.expireTs),
+    sendTs(other.sendTs),
+    sendAttempts(other.sendAttempts),
+    fastRetransmit(other.fastRetransmit),
+    mtu(other.mtu),
+    crc16(other.crc16),
+    version(other.version)
+{
+}
+
+Packet& Packet::operator=(const Packet& other)
+{
+    if (&other != this) {
+        chanId = other.chanId;
+        seqNum = other.seqNum;
+        gap = other.gap;
+        flags = other.flags;
+        payloadLen = other.payloadLen;
+        payload = other.payload;
+        if (mtu != other.mtu) {
+            delete buffer;
+            buffer = new uint32_t[(other.mtu + sizeof(uint32_t) - 1) / sizeof(uint32_t)];
+        }
+        expireTs = other.expireTs;
+        sendTs = other.sendTs;
+        sendAttempts = other.sendAttempts;
+        fastRetransmit = other.fastRetransmit;
+        mtu = other.mtu;
+        crc16 = other.crc16;
+        version = other.version;
+    }
+    return *this;
+}
+
 Packet::~Packet()
 {
     delete[] buffer;
@@ -160,7 +202,9 @@ void Packet::Marshal()
     }
     uint16_t crc = 0;
     CRC16_Compute(tBuf, CRC_OFFSET, &crc);
-    CRC16_Compute(tBuf + PAYLOAD_OFFSET, payloadLen, &crc);
+    if (payloadLen) {
+        CRC16_Compute(tBuf + PAYLOAD_OFFSET, payloadLen, &crc);
+    }
     *reinterpret_cast<uint16_t*>(tBuf + CRC_OFFSET) = htole16(crc);
 }
 

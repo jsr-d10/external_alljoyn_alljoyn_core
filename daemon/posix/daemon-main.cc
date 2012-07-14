@@ -122,11 +122,9 @@ static const char
     "  </ice>"
     "  <ice_discovery_manager>"
     "    <property interfaces=\"*\"/>"
-    "    <property server=\"rdvs-test.qualcomm.com\"/>"
-    "    <property EthernetPrefix=\"eth\"/>"
-    "    <property WiFiPrefix=\"wlan\"/>"
-    "    <property MobileNwPrefix=\"ppp\"/>"
-    "    <property Protocol=\"HTTP\"/>"
+    "    <property server=\"rdvs.alljoyn.org\"/>"
+    "    <property protocol=\"HTTP\"/>"
+    "    <property enable_ipv6=\"false\"/>"
     "  </ice_discovery_manager>"
     "</busconfig>";
 

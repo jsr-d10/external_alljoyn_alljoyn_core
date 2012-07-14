@@ -59,8 +59,38 @@
 
 #define QCC_MODULE "ALLJOYN"
 
+
 using namespace std;
 using namespace qcc;
+
+// declare these in the anonymous namespace so that the symbols will not be
+// visible outside this translation unit
+namespace {
+using namespace ajn;
+
+struct JoinSessionAsyncCBContext {
+    BusAttachment::JoinSessionAsyncCB* callback;
+    SessionListener* sessionListener;
+    void* context;
+
+    JoinSessionAsyncCBContext(BusAttachment::JoinSessionAsyncCB* callback, SessionListener* sessionListener, void* context) :
+        callback(callback),
+        sessionListener(sessionListener),
+        context(context)
+    { }
+};
+
+struct SetLinkTimeoutAsyncCBContext {
+    BusAttachment::SetLinkTimeoutAsyncCB* callback;
+    void* context;
+
+    SetLinkTimeoutAsyncCBContext(BusAttachment::SetLinkTimeoutAsyncCB* callback, void* context) :
+        callback(callback),
+        context(context)
+    { }
+};
+
+}
 
 namespace ajn {
 
@@ -82,7 +112,6 @@ BusAttachment::Internal::Internal(const char* appName,
     router(router ? router : new ClientRouter),
     localEndpoint(transportList.GetLocalTransport()->GetLocalEndpoint()),
     timer("BusTimer", true),
-    dispatcher("BusDispatcher", true, 4),
     allowRemoteMessages(allowRemoteMessages),
     listenAddresses(listenAddresses ? listenAddresses : ""),
     stopLock(),
@@ -116,7 +145,6 @@ BusAttachment::Internal::~Internal()
      * Make sure that all threads that might possibly access this object have been joined.
      */
     timer.Join();
-    dispatcher.Join();
     transportList.Join();
     delete router;
     router = NULL;
@@ -238,15 +266,8 @@ QStatus BusAttachment::Start()
 
     isStarted = hasStarted = true;
 
-    /*
-     * Start the alljoyn signal dispatcher first because the dispatcher thread is responsible,
-     * via the Internal::ThreadListener, for stopping the timer thread and the transports.
-     */
-    status = busInternal->dispatcher.Start();
-    if (ER_OK == status) {
-        /* Start the timer */
-        status = busInternal->timer.Start();
-    }
+    /* Start the timer */
+    status = busInternal->timer.Start();
 
     if (ER_OK == status) {
         /* Start the transports */
@@ -260,7 +281,6 @@ QStatus BusAttachment::Start()
 
     if (status != ER_OK) {
         QCC_LogError(status, ("BusAttachment::Start failed to start"));
-        busInternal->dispatcher.Stop();
         busInternal->timer.Stop();
         busInternal->transportList.Stop();
         WaitStopInternal();
@@ -462,20 +482,19 @@ QStatus BusAttachment::StopInternal(bool blockUntilStopped)
          * Let bus listeners know the bus is stopping.
          */
         busInternal->listenersLock.Lock(MUTEX_CONTEXT);
-        Internal::ListenerList::iterator it = busInternal->listeners.begin();
+        Internal::ListenerSet::iterator it = busInternal->listeners.begin();
         while (it != busInternal->listeners.end()) {
-            (*it++)->BusStopping();
+            Internal::ProtectedBusListener l = *it;
+            busInternal->listenersLock.Unlock(MUTEX_CONTEXT);
+            (*l)->BusStopping();
+            busInternal->listenersLock.Lock(MUTEX_CONTEXT);
+            it = busInternal->listeners.upper_bound(l);
         }
         busInternal->listenersLock.Unlock(MUTEX_CONTEXT);
         /* Stop the timer thread */
         status = busInternal->timer.Stop();
         if (ER_OK != status) {
             QCC_LogError(status, ("Timer::Stop() failed"));
-        }
-        /* Stop the dispatcher */
-        status = busInternal->dispatcher.Stop();
-        if (ER_OK != status) {
-            QCC_LogError(status, ("Dispatcher::Stop() failed"));
         }
         /* Stop the transport list */
         status = busInternal->transportList.Stop();
@@ -514,7 +533,6 @@ void BusAttachment::WaitStopInternal()
          */
         if (isStarted) {
             busInternal->timer.Join();
-            busInternal->dispatcher.Join();
             busInternal->transportList.Join();
 
             /* Clear peer state */
@@ -526,11 +544,11 @@ void BusAttachment::WaitStopInternal()
             isStarted = false;
             isStopping = false;
 
-            Internal::ListenerList::iterator it = busInternal->listeners.begin();
-            while (it != busInternal->listeners.end()) {
-                ProtectedBusListener* listener = *(it++);
-                delete listener;
-            }
+            busInternal->listeners.clear();
+
+            busInternal->sessionPortListeners.clear();
+
+            busInternal->sessionListeners.clear();
         }
 
         busInternal->stopLock.Unlock(MUTEX_CONTEXT);
@@ -849,6 +867,10 @@ QStatus BusAttachment::FindAdvertisedName(const char* namePrefix)
         return ER_BUS_NOT_CONNECTED;
     }
 
+    if (!namePrefix) {
+        return ER_BAD_ARG_1;
+    }
+
     Message reply(*this);
     MsgArg args[1];
     size_t numArgs = ArraySize(args);
@@ -1003,32 +1025,46 @@ void BusAttachment::RegisterBusListener(BusListener& listener)
 {
     busInternal->listenersLock.Lock(MUTEX_CONTEXT);
     // push front so that we can easily get an iterator pointing to the new element
-    busInternal->listeners.push_front(new ProtectedBusListener(&listener));
-    busInternal->listenerMap[&listener] = busInternal->listeners.begin();
+    BusListener* pListener = &listener;
+    Internal::ProtectedBusListener protectedListener(pListener);
+    busInternal->listeners.insert(protectedListener);
 
     /* Let listener know which bus attachment it has been registered on */
-    listener.ListenerRegistered(this);
     busInternal->listenersLock.Unlock(MUTEX_CONTEXT);
+    (*protectedListener)->ListenerRegistered(this);
 }
 
 void BusAttachment::UnregisterBusListener(BusListener& listener)
 {
     busInternal->listenersLock.Lock(MUTEX_CONTEXT);
 
-    Internal::ListenerList::iterator it =  busInternal->listeners.end();
-    Internal::ListenerMap::iterator mit = busInternal->listenerMap.find(&listener);
-
-    if (mit != busInternal->listenerMap.end()) {
-        it = mit->second;
-        busInternal->listenerMap.erase(mit);
+    /* Look for listener on ListenerSet */
+    Internal::ListenerSet::iterator it = busInternal->listeners.begin();
+    while (it != busInternal->listeners.end()) {
+        if (**it == &listener) {
+            break;
+        }
+        ++it;
     }
 
+    /* Wait for all refs to ProtectedBusListener to exit */
+    while ((it != busInternal->listeners.end()) && (it->GetRefCount() > 1)) {
+        Internal::ProtectedBusListener l = *it;
+        busInternal->listenersLock.Unlock(MUTEX_CONTEXT);
+        qcc::Sleep(5);
+        busInternal->listenersLock.Lock(MUTEX_CONTEXT);
+        it = busInternal->listeners.find(l);
+    }
+
+    /* Delete the listeners entry and call user's callback (unlocked) */
     if (it != busInternal->listeners.end()) {
-        delete *it;
+        Internal::ProtectedBusListener l = *it;
         busInternal->listeners.erase(it);
-        listener.ListenerUnregistered();
+        busInternal->listenersLock.Unlock(MUTEX_CONTEXT);
+        (*l)->ListenerUnregistered();
+    } else {
+        busInternal->listenersLock.Unlock(MUTEX_CONTEXT);
     }
-    busInternal->listenersLock.Unlock(MUTEX_CONTEXT);
 }
 
 QStatus BusAttachment::NameHasOwner(const char* name, bool& hasOwner)
@@ -1110,7 +1146,8 @@ QStatus BusAttachment::BindSessionPort(SessionPort& sessionPort, const SessionOp
         }
         if (status == ER_OK) {
             busInternal->sessionListenersLock.Lock(MUTEX_CONTEXT);
-            pair<SessionPort, ProtectedSessionPortListener*> elem(sessionPort, new ProtectedSessionPortListener(&listener));
+            SessionPortListener* pListener = &listener;
+            pair<SessionPort, Internal::ProtectedSessionPortListener> elem(sessionPort, Internal::ProtectedSessionPortListener(pListener));
             busInternal->sessionPortListeners.insert(elem);
             busInternal->sessionListenersLock.Unlock(MUTEX_CONTEXT);
         }
@@ -1153,27 +1190,22 @@ QStatus BusAttachment::UnbindSessionPort(SessionPort sessionPort)
         }
         if (status == ER_OK) {
             busInternal->sessionListenersLock.Lock(MUTEX_CONTEXT);
-            map<SessionPort, ProtectedSessionPortListener*>::iterator it =
+            Internal::SessionPortListenerMap::iterator it =
                 busInternal->sessionPortListeners.find(sessionPort);
 
             if (it != busInternal->sessionPortListeners.end()) {
-                delete it->second;
+                while (it->second.GetRefCount() > 1) {
+                    busInternal->sessionListenersLock.Unlock(MUTEX_CONTEXT);
+                    qcc::Sleep(5);
+                    busInternal->sessionListenersLock.Lock(MUTEX_CONTEXT);
+                }
                 busInternal->sessionPortListeners.erase(sessionPort);
             }
-
             busInternal->sessionListenersLock.Unlock(MUTEX_CONTEXT);
         }
     }
     return status;
 }
-
-struct _JoinSessionMethodCBContext {
-    BusAttachment::JoinSessionAsyncCB* callback;
-    SessionListener* sessionListener;
-    void* context;
-    _JoinSessionMethodCBContext(BusAttachment::JoinSessionAsyncCB* callback, SessionListener* sessionListener, void* context)
-        : callback(callback), sessionListener(sessionListener), context(context) { }
-};
 
 QStatus BusAttachment::JoinSessionAsync(const char* sessionHost, SessionPort sessionPort, SessionListener* sessionListener,
                                         const SessionOpts& opts, BusAttachment::JoinSessionAsyncCB* callback, void* context)
@@ -1192,92 +1224,99 @@ QStatus BusAttachment::JoinSessionAsync(const char* sessionHost, SessionPort ses
     SetSessionOpts(opts, args[2]);
 
     const ProxyBusObject& alljoynObj = this->GetAllJoynProxyObj();
+    JoinSessionAsyncCBContext* cbCtx = new JoinSessionAsyncCBContext(callback, sessionListener, context);
+
     QStatus status = alljoynObj.MethodCallAsync(org::alljoyn::Bus::InterfaceName,
                                                 "JoinSession",
                                                 busInternal,
-                                                static_cast<MessageReceiver::ReplyHandler>(&BusAttachment::Internal::JoinSessionMethodCB),
+                                                static_cast<MessageReceiver::ReplyHandler>(&BusAttachment::Internal::JoinSessionAsyncCB),
                                                 args,
                                                 ArraySize(args),
-                                                reinterpret_cast<void*>(new _JoinSessionMethodCBContext(callback, sessionListener, context)),
+                                                cbCtx,
                                                 90000);
+    if (status != ER_OK) {
+        delete cbCtx;
+    }
     return status;
 }
 
-void BusAttachment::Internal::JoinSessionMethodCB(Message& reply, void* context)
-{
-    /* Dispatch reply */
-    QStatus status = DispatchMessage(*this, reply, context);
-    if (status != ER_OK) {
-        QCC_LogError(status, ("DispatchMessage for JoinSessionMethodCB failed"));
-    }
-}
 
-void BusAttachment::Internal::DoJoinSessionMethodCB(Message& reply, void* context)
+void BusAttachment::Internal::JoinSessionAsyncCB(Message& reply, void* context)
 {
-    _JoinSessionMethodCBContext* ctx = reinterpret_cast<_JoinSessionMethodCBContext*>(context);
+    JoinSessionAsyncCBContext* ctx = reinterpret_cast<JoinSessionAsyncCBContext*>(context);
 
     QStatus status = ER_FAIL;
     SessionId sessionId = 0;
     SessionOpts opts;
     if (reply->GetType() == MESSAGE_METHOD_RET) {
-        const MsgArg* replyArgs;
-        size_t na;
-        reply->GetArgs(na, replyArgs);
-        assert(na == 3);
-        uint32_t disposition = replyArgs[0].v_uint32;
-        sessionId = replyArgs[1].v_uint32;
-        status = GetSessionOpts(replyArgs[2], opts);
-        if (status == ER_OK) {
-            switch (disposition) {
-            case ALLJOYN_JOINSESSION_REPLY_SUCCESS:
-                break;
-
-            case ALLJOYN_JOINSESSION_REPLY_NO_SESSION:
-                status = ER_ALLJOYN_JOINSESSION_REPLY_NO_SESSION;
-                break;
-
-            case ALLJOYN_JOINSESSION_REPLY_UNREACHABLE:
-                status = ER_ALLJOYN_JOINSESSION_REPLY_UNREACHABLE;
-                break;
-
-            case ALLJOYN_JOINSESSION_REPLY_CONNECT_FAILED:
-                status = ER_ALLJOYN_JOINSESSION_REPLY_CONNECT_FAILED;
-                break;
-
-            case ALLJOYN_JOINSESSION_REPLY_REJECTED:
-                status = ER_ALLJOYN_JOINSESSION_REPLY_REJECTED;
-                break;
-
-            case ALLJOYN_JOINSESSION_REPLY_BAD_SESSION_OPTS:
-                status = ER_ALLJOYN_JOINSESSION_REPLY_BAD_SESSION_OPTS;
-                break;
-
-            case ALLJOYN_JOINSESSION_REPLY_ALREADY_JOINED:
-                status = ER_ALLJOYN_JOINSESSION_REPLY_ALREADY_JOINED;
-                break;
-
-            case ALLJOYN_JOINSESSION_REPLY_FAILED:
-                status = ER_ALLJOYN_JOINSESSION_REPLY_FAILED;
-                break;
-
-            default:
-                status = ER_BUS_UNEXPECTED_DISPOSITION;
-                break;
-            }
-        }
+        status = bus.GetJoinSessionResponse(reply, sessionId, opts);
     } else if (reply->GetType() == MESSAGE_ERROR) {
         status = ER_BUS_REPLY_IS_ERROR_MESSAGE;
         QCC_LogError(status, ("%s.JoinSession returned ERROR_MESSAGE (error=%s)", org::alljoyn::Bus::InterfaceName, reply->GetErrorDescription().c_str()));
     }
     if (ctx->sessionListener && (status == ER_OK)) {
         sessionListenersLock.Lock(MUTEX_CONTEXT);
-        sessionListeners[sessionId] = new ProtectedSessionListener(ctx->sessionListener);
+        sessionListeners[sessionId] = ProtectedSessionListener(ctx->sessionListener);
         sessionListenersLock.Unlock(MUTEX_CONTEXT);
     }
 
     /* Call the callback */
     ctx->callback->JoinSessionCB(status, sessionId, opts, ctx->context);
     delete ctx;
+}
+
+QStatus BusAttachment::GetJoinSessionResponse(Message& reply, SessionId& sessionId, SessionOpts& opts)
+{
+    QStatus status = ER_OK;
+    const MsgArg* replyArgs;
+    size_t na;
+    reply->GetArgs(na, replyArgs);
+    assert(na == 3);
+    uint32_t disposition = replyArgs[0].v_uint32;
+    sessionId = replyArgs[1].v_uint32;
+    status = GetSessionOpts(replyArgs[2], opts);
+    if (status != ER_OK) {
+        sessionId = 0;
+    } else {
+        switch (disposition) {
+        case ALLJOYN_JOINSESSION_REPLY_SUCCESS:
+            break;
+
+        case ALLJOYN_JOINSESSION_REPLY_NO_SESSION:
+            status = ER_ALLJOYN_JOINSESSION_REPLY_NO_SESSION;
+            break;
+
+        case ALLJOYN_JOINSESSION_REPLY_UNREACHABLE:
+            status = ER_ALLJOYN_JOINSESSION_REPLY_UNREACHABLE;
+            break;
+
+        case ALLJOYN_JOINSESSION_REPLY_CONNECT_FAILED:
+            status = ER_ALLJOYN_JOINSESSION_REPLY_CONNECT_FAILED;
+            break;
+
+        case ALLJOYN_JOINSESSION_REPLY_REJECTED:
+            status = ER_ALLJOYN_JOINSESSION_REPLY_REJECTED;
+            break;
+
+        case ALLJOYN_JOINSESSION_REPLY_BAD_SESSION_OPTS:
+            status = ER_ALLJOYN_JOINSESSION_REPLY_BAD_SESSION_OPTS;
+            break;
+
+        case ALLJOYN_JOINSESSION_REPLY_ALREADY_JOINED:
+            status = ER_ALLJOYN_JOINSESSION_REPLY_ALREADY_JOINED;
+            break;
+
+        case ALLJOYN_JOINSESSION_REPLY_FAILED:
+            status = ER_ALLJOYN_JOINSESSION_REPLY_FAILED;
+            break;
+
+        default:
+            status = ER_BUS_UNEXPECTED_DISPOSITION;
+            break;
+        }
+    }
+
+    return status;
 }
 
 QStatus BusAttachment::JoinSession(const char* sessionHost, SessionPort sessionPort, SessionListener* listener, SessionId& sessionId, SessionOpts& opts)
@@ -1294,67 +1333,21 @@ QStatus BusAttachment::JoinSession(const char* sessionHost, SessionPort sessionP
     size_t numArgs = 2;
 
     MsgArg::Set(args, numArgs, "sq", sessionHost, sessionPort);
-
     SetSessionOpts(opts, args[2]);
 
     const ProxyBusObject& alljoynObj = this->GetAllJoynProxyObj();
-
     QStatus status = alljoynObj.MethodCall(org::alljoyn::Bus::InterfaceName, "JoinSession", args, ArraySize(args), reply);
+
     if (ER_OK == status) {
-        const MsgArg* replyArgs;
-        size_t na;
-        reply->GetArgs(na, replyArgs);
-        assert(na == 3);
-        uint32_t disposition = replyArgs[0].v_uint32;
-        sessionId = replyArgs[1].v_uint32;
-        status = GetSessionOpts(replyArgs[2], opts);
-        if (status != ER_OK) {
-            sessionId = 0;
-        } else {
-            switch (disposition) {
-            case ALLJOYN_JOINSESSION_REPLY_SUCCESS:
-                break;
-
-            case ALLJOYN_JOINSESSION_REPLY_NO_SESSION:
-                status = ER_ALLJOYN_JOINSESSION_REPLY_NO_SESSION;
-                break;
-
-            case ALLJOYN_JOINSESSION_REPLY_UNREACHABLE:
-                status = ER_ALLJOYN_JOINSESSION_REPLY_UNREACHABLE;
-                break;
-
-            case ALLJOYN_JOINSESSION_REPLY_CONNECT_FAILED:
-                status = ER_ALLJOYN_JOINSESSION_REPLY_CONNECT_FAILED;
-                break;
-
-            case ALLJOYN_JOINSESSION_REPLY_REJECTED:
-                status = ER_ALLJOYN_JOINSESSION_REPLY_REJECTED;
-                break;
-
-            case ALLJOYN_JOINSESSION_REPLY_BAD_SESSION_OPTS:
-                status = ER_ALLJOYN_JOINSESSION_REPLY_BAD_SESSION_OPTS;
-                break;
-
-            case ALLJOYN_JOINSESSION_REPLY_ALREADY_JOINED:
-                status = ER_ALLJOYN_JOINSESSION_REPLY_ALREADY_JOINED;
-                break;
-
-            case ALLJOYN_JOINSESSION_REPLY_FAILED:
-                status = ER_ALLJOYN_JOINSESSION_REPLY_FAILED;
-                break;
-
-            default:
-                status = ER_BUS_UNEXPECTED_DISPOSITION;
-                break;
-            }
-        }
+        status = GetJoinSessionResponse(reply, sessionId, opts);
     } else {
         sessionId = 0;
         QCC_LogError(status, ("%s.JoinSession returned ERROR_MESSAGE (error=%s)", org::alljoyn::Bus::InterfaceName, reply->GetErrorDescription().c_str()));
     }
+
     if (listener && (status == ER_OK)) {
         busInternal->sessionListenersLock.Lock(MUTEX_CONTEXT);
-        busInternal->sessionListeners[sessionId] = new ProtectedSessionListener(listener);
+        busInternal->sessionListeners[sessionId] = Internal::ProtectedSessionListener(listener);
         busInternal->sessionListenersLock.Unlock(MUTEX_CONTEXT);
     }
     return status;
@@ -1394,6 +1387,16 @@ QStatus BusAttachment::LeaveSession(const SessionId& sessionId)
     } else {
         QCC_LogError(status, ("%s.LeaveSession returned ERROR_MESSAGE (error=%s)", org::alljoyn::Bus::InterfaceName, reply->GetErrorDescription().c_str()));
     }
+
+    if (status == ER_OK) {
+        busInternal->sessionListenersLock.Lock(MUTEX_CONTEXT);
+        Internal::SessionListenerMap::iterator it = busInternal->sessionListeners.find(sessionId);
+        if (it != busInternal->sessionListeners.end()) {
+            busInternal->sessionListeners.erase(it);
+        }
+        busInternal->sessionListenersLock.Unlock(MUTEX_CONTEXT);
+    }
+
     return status;
 }
 
@@ -1427,6 +1430,81 @@ QStatus BusAttachment::GetSessionFd(SessionId sessionId, SocketFd& sockFd)
     return status;
 }
 
+QStatus BusAttachment::SetLinkTimeoutAsync(SessionId sessionid, uint32_t linkTimeout, BusAttachment::SetLinkTimeoutAsyncCB* callback, void* context)
+{
+    if (!IsConnected()) {
+        return ER_BUS_NOT_CONNECTED;
+    }
+
+    MsgArg args[2];
+    args[0].Set("u", sessionid);
+    args[1].Set("u", linkTimeout);
+
+    const ProxyBusObject& alljoynObj = this->GetAllJoynProxyObj();
+    SetLinkTimeoutAsyncCBContext* cbCtx = new SetLinkTimeoutAsyncCBContext(callback, context);
+    QStatus status = alljoynObj.MethodCallAsync(
+        org::alljoyn::Bus::InterfaceName,
+        "SetLinkTimeout",
+        busInternal,
+        static_cast<MessageReceiver::ReplyHandler>(&BusAttachment::Internal::SetLinkTimeoutAsyncCB),
+        args,
+        ArraySize(args),
+        cbCtx,
+        90000);
+    if (status != ER_OK) {
+        delete cbCtx;
+    }
+    return status;
+}
+
+void BusAttachment::Internal::SetLinkTimeoutAsyncCB(Message& reply, void* context)
+{
+    SetLinkTimeoutAsyncCBContext* ctx = static_cast<SetLinkTimeoutAsyncCBContext*>(context);
+    uint32_t timeout = 0;
+
+    QStatus status = ER_OK;
+    if (reply->GetType() == MESSAGE_METHOD_RET) {
+        status = bus.GetLinkTimeoutResponse(reply, timeout);
+    } else if (reply->GetType() == MESSAGE_ERROR) {
+        status = ER_BUS_REPLY_IS_ERROR_MESSAGE;
+        QCC_LogError(status, ("%s.JoinSession returned ERROR_MESSAGE (error=%s)", org::alljoyn::Bus::InterfaceName, reply->GetErrorDescription().c_str()));
+    }
+
+    /* Call the user's callback */
+    ctx->callback->SetLinkTimeoutCB(status, timeout, ctx->context);
+    delete ctx;
+}
+
+QStatus BusAttachment::GetLinkTimeoutResponse(Message& reply, uint32_t& timeout)
+{
+    QStatus status = ER_OK;
+    const MsgArg* replyArgs;
+    size_t na;
+    reply->GetArgs(na, replyArgs);
+    assert(na == 2);
+
+    switch (replyArgs[0].v_uint32) {
+    case ALLJOYN_SETLINKTIMEOUT_REPLY_SUCCESS:
+        timeout = replyArgs[1].v_uint32;
+        break;
+
+    case ALLJOYN_SETLINKTIMEOUT_REPLY_NO_DEST_SUPPORT:
+        status = ER_ALLJOYN_SETLINKTIMEOUT_REPLY_NO_DEST_SUPPORT;
+        break;
+
+    case ALLJOYN_SETLINKTIMEOUT_REPLY_NO_SESSION:
+        status = ER_BUS_NO_SESSION;
+        break;
+
+    default:
+    case ALLJOYN_SETLINKTIMEOUT_REPLY_FAILED:
+        status = ER_ALLJOYN_SETLINKTIMEOUT_REPLY_FAILED;
+        break;
+    }
+
+    return status;
+}
+
 QStatus BusAttachment::SetLinkTimeout(SessionId sessionId, uint32_t& linkTimeout)
 {
     if (!IsConnected()) {
@@ -1440,157 +1518,116 @@ QStatus BusAttachment::SetLinkTimeout(SessionId sessionId, uint32_t& linkTimeout
     args[1].Set("u", linkTimeout);
 
     QStatus status = this->GetAllJoynProxyObj().MethodCall(org::alljoyn::Bus::InterfaceName, "SetLinkTimeout", args, ArraySize(args), reply);
-    if (status != ER_OK) {
+
+    if (status == ER_OK) {
+        status = GetLinkTimeoutResponse(reply, linkTimeout);
+    } else {
         QCC_LogError(status, ("%s.SetLinkTimeout returned ERROR_MESSAGE (error=%s)", org::alljoyn::Bus::InterfaceName, reply->GetErrorDescription().c_str()));
         status = ER_ALLJOYN_SETLINKTIMEOUT_REPLY_NOT_SUPPORTED;
-    } else {
-        uint32_t disposition;
-        uint32_t replyLinkTimeout = 0;
-        status = reply->GetArgs("uu", &disposition, &replyLinkTimeout);
-        if (status == ER_OK) {
-            switch (disposition) {
-            case ALLJOYN_SETLINKTIMEOUT_REPLY_SUCCESS:
-                linkTimeout = replyLinkTimeout;
-                break;
-
-            case ALLJOYN_SETLINKTIMEOUT_REPLY_NO_DEST_SUPPORT:
-                status = ER_ALLJOYN_SETLINKTIMEOUT_REPLY_NO_DEST_SUPPORT;
-                break;
-
-            case ALLJOYN_SETLINKTIMEOUT_REPLY_NO_SESSION:
-                status = ER_BUS_NO_SESSION;
-                break;
-
-            default:
-            case ALLJOYN_SETLINKTIMEOUT_REPLY_FAILED:
-                status = ER_ALLJOYN_SETLINKTIMEOUT_REPLY_FAILED;
-                break;
-            }
-        }
     }
+
     return status;
-}
-
-QStatus BusAttachment::Internal::DispatchMessage(AlarmListener& listener, Message& msg, void* context, uint32_t delay)
-{
-    QStatus status;
-
-    if (!bus.isStarted || !dispatcher.IsRunning()) {
-        status = ER_BUS_BUS_NOT_STARTED;
-    } else if (bus.isStopping) {
-        status = ER_BUS_STOPPING;
-    } else {
-        pair<Message, void*>* alarmContext = new pair<Message, void*>(msg, context);
-        Alarm alarm(delay, &listener, 0, alarmContext);
-        status = dispatcher.AddAlarm(alarm);
-        if (status != ER_OK) {
-            delete alarmContext;
-        }
-    }
-    return status;
-}
-
-QStatus BusAttachment::Internal::Dispatch(AlarmListener& listener, void* context, uint32_t delay)
-{
-    QStatus status;
-
-    if (!bus.isStarted || !dispatcher.IsRunning()) {
-        status = ER_BUS_BUS_NOT_STARTED;
-    } else if (bus.isStopping) {
-        status = ER_BUS_STOPPING;
-    } else {
-        Alarm alarm(delay, &listener, 0, context);
-        status = dispatcher.AddAlarm(alarm);
-    }
-    return status;
-}
-
-void BusAttachment::Internal::RemoveDispatchListener(AlarmListener& listener)
-{
-    dispatcher.RemoveAlarmsWithListener(listener);
 }
 
 void BusAttachment::Internal::LocalEndpointDisconnected()
 {
     listenersLock.Lock(MUTEX_CONTEXT);
-    ListenerList::iterator it = listeners.begin();
+    ListenerSet::iterator it = listeners.begin();
     while (it != listeners.end()) {
-        (*it++)->BusDisconnected();
+        ProtectedBusListener l = *it;
+        listenersLock.Unlock(MUTEX_CONTEXT);
+        (*l)->BusDisconnected();
+        listenersLock.Lock(MUTEX_CONTEXT);
+        it = listeners.upper_bound(l);
     }
     listenersLock.Unlock(MUTEX_CONTEXT);
 }
 
-void BusAttachment::Internal::AllJoynSignalHandler(const InterfaceDescription::Member* member,
-                                                   const char* srcPath,
-                                                   Message& message)
+void BusAttachment::EnableConcurrentCallbacks()
 {
-    /* Call listeners back on a non-Rx thread */
-    DispatchMessage(*this, message, NULL);
+    busInternal->localEndpoint.GetDispatcher().EnableReentrancy();
 }
 
-void BusAttachment::Internal::AlarmTriggered(const Alarm& alarm, QStatus reason)
+void BusAttachment::Internal::AllJoynSignalHandler(const InterfaceDescription::Member* member,
+                                                   const char* srcPath,
+                                                   Message& msg)
 {
     /* Dispatch thread for BusListener callbacks */
-    pair<Message, void*>* alarmContext = reinterpret_cast<pair<Message, void*>*>(alarm.GetContext());
-    Message& msg = alarmContext->first;
     size_t numArgs;
     const MsgArg* args;
     msg->GetArgs(numArgs, args);
 
-    if (reason == ER_OK) {
-        if (msg->GetType() == MESSAGE_SIGNAL) {
-            if (0 == strcmp("FoundAdvertisedName", msg->GetMemberName())) {
-                listenersLock.Lock(MUTEX_CONTEXT);
-                ListenerList::iterator it = listeners.begin();
-                while (it != listeners.end()) {
-                    (*it++)->FoundAdvertisedName(args[0].v_string.str, args[1].v_uint16, args[2].v_string.str);
-                }
+    if (msg->GetType() == MESSAGE_SIGNAL) {
+        if (0 == strcmp("FoundAdvertisedName", msg->GetMemberName())) {
+            listenersLock.Lock(MUTEX_CONTEXT);
+            ListenerSet::iterator it = listeners.begin();
+            while (it != listeners.end()) {
+                ProtectedBusListener pl = *it;
                 listenersLock.Unlock(MUTEX_CONTEXT);
-            } else if (0 == strcmp("LostAdvertisedName", msg->GetMemberName())) {
+                (*pl)->FoundAdvertisedName(args[0].v_string.str, args[1].v_uint16, args[2].v_string.str);
                 listenersLock.Lock(MUTEX_CONTEXT);
-                ListenerList::iterator it = listeners.begin();
-                while (it != listeners.end()) {
-                    (*it++)->LostAdvertisedName(args[0].v_string.str, args[1].v_uint16, args[2].v_string.str);
-                }
+                it = listeners.upper_bound(pl);
+            }
+            listenersLock.Unlock(MUTEX_CONTEXT);
+        } else if (0 == strcmp("LostAdvertisedName", msg->GetMemberName())) {
+            listenersLock.Lock(MUTEX_CONTEXT);
+            ListenerSet::iterator it = listeners.begin();
+            while (it != listeners.end()) {
+                ProtectedBusListener pl = *it;
                 listenersLock.Unlock(MUTEX_CONTEXT);
-            } else if (0 == strcmp("SessionLost", msg->GetMemberName())) {
-                sessionListenersLock.Lock(MUTEX_CONTEXT);
-                SessionId id = static_cast<SessionId>(args[0].v_uint32);
-                SessionListenerMap::iterator slit = sessionListeners.find(id);
-                if ((slit != sessionListeners.end()) && slit->second) {
-                    slit->second->SessionLost(id);
-                }
+                (*pl)->LostAdvertisedName(args[0].v_string.str, args[1].v_uint16, args[2].v_string.str);
+                listenersLock.Lock(MUTEX_CONTEXT);
+                it = listeners.upper_bound(pl);
+            }
+            listenersLock.Unlock(MUTEX_CONTEXT);
+        } else if (0 == strcmp("SessionLost", msg->GetMemberName())) {
+            sessionListenersLock.Lock(MUTEX_CONTEXT);
+            SessionId id = static_cast<SessionId>(args[0].v_uint32);
+            SessionListenerMap::iterator slit = sessionListeners.find(id);
+            if (slit != sessionListeners.end()) {
+                ProtectedSessionListener pl = slit->second;
                 sessionListenersLock.Unlock(MUTEX_CONTEXT);
-            } else if (0 == strcmp("NameOwnerChanged", msg->GetMemberName())) {
-                listenersLock.Lock(MUTEX_CONTEXT);
-                ListenerList::iterator it = listeners.begin();
-                while (it != listeners.end()) {
-                    (*it++)->NameOwnerChanged(args[0].v_string.str,
-                                              (0 < args[1].v_string.len) ? args[1].v_string.str : NULL,
-                                              (0 < args[2].v_string.len) ? args[2].v_string.str : NULL);
+                if (*pl) {
+                    (*pl)->SessionLost(id);
                 }
+            } else {
+                sessionListenersLock.Unlock(MUTEX_CONTEXT);
+            }
+        } else if (0 == strcmp("NameOwnerChanged", msg->GetMemberName())) {
+            listenersLock.Lock(MUTEX_CONTEXT);
+            ListenerSet::iterator it = listeners.begin();
+            while (it != listeners.end()) {
+                ProtectedBusListener pl = *it;
                 listenersLock.Unlock(MUTEX_CONTEXT);
-            } else if (0 == strcmp("MPSessionChanged", msg->GetMemberName())) {
-                sessionListenersLock.Lock(MUTEX_CONTEXT);
-                SessionId id = static_cast<SessionId>(args[0].v_uint32);
-                const char* member = args[1].v_string.str;
-                SessionListenerMap::iterator slit = sessionListeners.find(id);
-                if ((slit != sessionListeners.end()) && slit->second) {
+                (*pl)->NameOwnerChanged(args[0].v_string.str,
+                                        (0 < args[1].v_string.len) ? args[1].v_string.str : NULL,
+                                        (0 < args[2].v_string.len) ? args[2].v_string.str : NULL);
+                listenersLock.Lock(MUTEX_CONTEXT);
+                it = listeners.upper_bound(pl);
+            }
+            listenersLock.Unlock(MUTEX_CONTEXT);
+        } else if (0 == strcmp("MPSessionChanged", msg->GetMemberName())) {
+            SessionId id = static_cast<SessionId>(args[0].v_uint32);
+            const char* member = args[1].v_string.str;
+            sessionListenersLock.Lock(MUTEX_CONTEXT);
+            SessionListenerMap::iterator slit = sessionListeners.find(id);
+            if (slit != sessionListeners.end()) {
+                ProtectedSessionListener pl = slit->second;
+                sessionListenersLock.Unlock(MUTEX_CONTEXT);
+                if (*pl) {
                     if (args[2].v_bool) {
-                        slit->second->SessionMemberAdded(id, member);
+                        (*pl)->SessionMemberAdded(id, member);
                     } else {
-                        slit->second->SessionMemberRemoved(id, member);
+                        (*pl)->SessionMemberRemoved(id, member);
                     }
                 }
-                sessionListenersLock.Unlock(MUTEX_CONTEXT);
             } else {
-                QCC_DbgPrintf(("Unrecognized signal \"%s.%s\" received", msg->GetInterface(), msg->GetMemberName()));
+                sessionListenersLock.Unlock(MUTEX_CONTEXT);
             }
-        } else if (msg->GetType() == MESSAGE_METHOD_RET) {
-            DoJoinSessionMethodCB(msg, alarmContext->second);
+        } else {
+            QCC_DbgPrintf(("Unrecognized signal \"%s.%s\" received", msg->GetInterface(), msg->GetMemberName()));
         }
     }
-    delete alarmContext;
 }
 
 uint32_t BusAttachment::GetTimestamp()
@@ -1623,16 +1660,15 @@ bool BusAttachment::Internal::CallAcceptListeners(SessionPort sessionPort, const
 
     /* Call sessionPortListener */
     sessionListenersLock.Lock(MUTEX_CONTEXT);
-    map<SessionPort, ProtectedSessionPortListener*>::iterator it = sessionPortListeners.find(sessionPort);
-    ProtectedSessionPortListener* listener = (it != sessionPortListeners.end()) ? it->second : NULL;
-    sessionListenersLock.Unlock(MUTEX_CONTEXT);
-
-    if (listener) {
-        isAccepted = listener->AcceptSessionJoiner(sessionPort, joiner, opts);
+    Internal::SessionPortListenerMap::iterator it = sessionPortListeners.find(sessionPort);
+    if (it != sessionPortListeners.end()) {
+        ProtectedSessionPortListener listener = it->second;
+        sessionListenersLock.Unlock(MUTEX_CONTEXT);
+        isAccepted = (*listener)->AcceptSessionJoiner(sessionPort, joiner, opts);
     } else {
+        sessionListenersLock.Unlock(MUTEX_CONTEXT);
         QCC_LogError(ER_FAIL, ("Unable to find sessionPortListener for port=%d", sessionPort));
     }
-
     return isAccepted;
 }
 
@@ -1640,18 +1676,21 @@ void BusAttachment::Internal::CallJoinedListeners(SessionPort sessionPort, Sessi
 {
     /* Call sessionListener */
     sessionListenersLock.Lock(MUTEX_CONTEXT);
-    map<SessionPort, ProtectedSessionPortListener*>::iterator it = sessionPortListeners.find(sessionPort);
+    SessionPortListenerMap::iterator it = sessionPortListeners.find(sessionPort);
     if (it != sessionPortListeners.end()) {
         /* Add entry to sessionListeners */
         if (sessionListeners.find(sessionId) == sessionListeners.end()) {
-            sessionListeners[sessionId] = NULL;
+            SessionListener* np = 0;
+            sessionListeners.insert(pair<SessionId, ProtectedSessionListener>(sessionId, ProtectedSessionListener(np)));
         }
         /* Notify user */
-        it->second->SessionJoined(sessionPort, sessionId, joiner);
+        ProtectedSessionPortListener cur = it->second;
+        sessionListenersLock.Unlock(MUTEX_CONTEXT);
+        (*cur)->SessionJoined(sessionPort, sessionId, joiner);
     } else {
+        sessionListenersLock.Unlock(MUTEX_CONTEXT);
         QCC_LogError(ER_FAIL, ("Unable to find sessionPortListener for port=%d", sessionPort));
     }
-    sessionListenersLock.Unlock(MUTEX_CONTEXT);
 }
 
 QStatus BusAttachment::Internal::SetSessionListener(SessionId id, SessionListener* listener)
@@ -1660,8 +1699,7 @@ QStatus BusAttachment::Internal::SetSessionListener(SessionId id, SessionListene
     sessionListenersLock.Lock(MUTEX_CONTEXT);
     SessionListenerMap::iterator it = sessionListeners.find(id);
     if (it != sessionListeners.end()) {
-        delete it->second;
-        it->second = new ProtectedSessionListener(listener);
+        it->second = ProtectedSessionListener(listener);
         status = ER_OK;
     }
     sessionListenersLock.Unlock(MUTEX_CONTEXT);

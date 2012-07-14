@@ -21,8 +21,8 @@ env['_ALLJOYNCORE_'] = True
 
 # Dependent Projects
 common_hdrs, common_objs = env.SConscript(['../common/SConscript'])
-if env['OS_GROUP'] == 'windows' or env['OS'] == 'android':
-    env.SConscript(['../stlport/SConscript'])
+#if env['OS_GROUP'] == 'windows' or env['OS'] == 'android':
+#    env.SConscript(['../stlport/SConscript'])
 
 if(not(env.has_key('BULLSEYE_BIN'))):
     print('BULLSEYE_BIN not specified')

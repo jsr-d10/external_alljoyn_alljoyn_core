@@ -73,6 +73,7 @@ RemoteEndpoint::RemoteEndpoint(BusAttachment& bus,
     connSpec(connectSpec),
     incoming(incoming),
     processId(-1),
+    alljoynVersion(0),
     refCount(0),
     isSocket(isSocket),
     armRxPause(false),
@@ -357,6 +358,11 @@ void* RemoteEndpoint::RxThread::Run(void* arg)
                 }
                 break;
 
+            case ER_ALERTED_THREAD:
+                GetStopEvent().ResetEvent();
+                status = ER_OK;
+                break;
+
             default:
                 break;
             }
@@ -464,6 +470,8 @@ void* RemoteEndpoint::TxThread::Run(void* arg)
 
 QStatus RemoteEndpoint::PushMessage(Message& msg)
 {
+    QCC_DbgTrace(("RemoteEndpoint::PushMessage(serial=%d)", msg->GetCallSerial()));
+
     static const size_t MAX_TX_QUEUE_SIZE = 30;
 
     QStatus status = ER_OK;

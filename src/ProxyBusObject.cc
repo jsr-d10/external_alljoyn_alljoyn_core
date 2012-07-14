@@ -33,6 +33,7 @@
 #include <qcc/Util.h>
 #include <qcc/Event.h>
 #include <qcc/Mutex.h>
+#include <qcc/ManagedObj.h>
 
 #include <alljoyn/BusAttachment.h>
 #include <alljoyn/DBusStd.h>
@@ -311,7 +312,7 @@ QStatus ProxyBusObject::AddChild(const ProxyBusObject& child)
             } else {
                 ProxyBusObject ro(*bus, serviceName.c_str(), item.c_str(), sessionId);
                 ch.push_back(ro);
-                cur = &ch.back();
+                cur = ch.empty() ? NULL : &ch.back();
             }
         }
         idx = ((qcc::String::npos == end) || ((end + 1) == childPath.size())) ? qcc::String::npos : end + 1;
@@ -495,19 +496,19 @@ QStatus ProxyBusObject::MethodCall(const InterfaceDescription::Member& method,
     Message msg(*bus);
     LocalEndpoint& localEndpoint = bus->GetInternal().GetLocalEndpoint();
 
+    // if we're being called from the LocalEndpoint (callback) thread, do not allow
+    // blocking calls unless BusAttachment::EnableConcurrentCallbacks has been called first
+    if (localEndpoint.GetDispatcher().ThreadHoldsLock()) {
+        status = ER_BUS_BLOCKING_CALL_NOT_ALLOWED;
+        goto MethodCallExit;
+    }
+
     if (!ImplementsInterface(method.iface->GetName())) {
         status = ER_BUS_OBJECT_NO_SUCH_INTERFACE;
         QCC_LogError(status, ("Object %s does not implement %s", path.c_str(), method.iface->GetName()));
         goto MethodCallExit;
     }
-    /*
-     * Check if the current thread allows blocking on the current bus.
-     */
-    if (!(flags & ALLJOYN_FLAG_NO_REPLY_EXPECTED) && !Thread::GetThread()->CanBlock(&bus)) {
-        status = ER_BUS_BLOCKING_CALL_NOT_ALLOWED;
-        QCC_LogError(status, ("A sychronous method call from inside a handler is not allowed"));
-        goto MethodCallExit;
-    }
+
     /*
      * If the interface is secure or encryption is explicitly requested the method call must be encrypted.
      */
@@ -550,17 +551,18 @@ QStatus ProxyBusObject::MethodCall(const InterfaceDescription::Member& method,
             status = bus->GetInternal().GetRouter().PushMessage(msg, localEndpoint);
         }
     } else {
-        SyncReplyContext ctxt(*bus);
+        ManagedObj<SyncReplyContext> ctxt(*bus);
         /*
          * Synchronous calls are really asynchronous calls that block waiting for a builtin
          * reply handler to be called.
          */
+        ManagedObj<SyncReplyContext>* heapCtx = new ManagedObj<SyncReplyContext>(ctxt);
         status = localEndpoint.RegisterReplyHandler(const_cast<MessageReceiver*>(static_cast<const MessageReceiver* const>(this)),
                                                     static_cast<MessageReceiver::ReplyHandler>(&ProxyBusObject::SyncReplyHandler),
                                                     method,
                                                     serial,
                                                     (flags & ALLJOYN_FLAG_ENCRYPTED) != 0,
-                                                    &ctxt,
+                                                    heapCtx,
                                                     timeout);
         if (status == ER_OK) {
             if (b2bEp) {
@@ -568,6 +570,9 @@ QStatus ProxyBusObject::MethodCall(const InterfaceDescription::Member& method,
             } else {
                 status = bus->GetInternal().GetRouter().PushMessage(msg, localEndpoint);
             }
+        } else {
+            delete heapCtx;
+            heapCtx = NULL;
         }
 
         Thread* thisThread = Thread::GetThread();
@@ -576,7 +581,7 @@ QStatus ProxyBusObject::MethodCall(const InterfaceDescription::Member& method,
             if (!isExiting) {
                 components->waitingThreads.push_back(thisThread);
                 lock->Unlock(MUTEX_CONTEXT);
-                status = Event::Wait(ctxt.event);
+                status = Event::Wait(ctxt->event);
                 lock->Lock(MUTEX_CONTEXT);
                 vector<Thread*>::iterator it = components->waitingThreads.begin();
                 while (it != components->waitingThreads.end()) {
@@ -590,7 +595,7 @@ QStatus ProxyBusObject::MethodCall(const InterfaceDescription::Member& method,
             lock->Unlock(MUTEX_CONTEXT);
         }
         if ((status == ER_OK) && (SYNC_METHOD_ALERTCODE_OK == thisThread->GetAlertCode())) {
-            replyMsg = ctxt.replyMsg;
+            replyMsg = ctxt->replyMsg;
         } else if (SYNC_METHOD_ALERTCODE_ABORT == thisThread->GetAlertCode()) {
             /*
              * We can't touch anything in this case since the external thread that was waiting
@@ -599,7 +604,11 @@ QStatus ProxyBusObject::MethodCall(const InterfaceDescription::Member& method,
             status = ER_BUS_METHOD_CALL_ABORTED;
             goto MethodCallExit;
         } else {
-            localEndpoint.UnregisterReplyHandler(serial);
+            if (localEndpoint.UnregisterReplyHandler(serial)) {
+                if (heapCtx) {
+                    delete heapCtx;
+                }
+            }
         }
     }
 
@@ -641,16 +650,17 @@ QStatus ProxyBusObject::MethodCall(const char* ifaceName,
 
 void ProxyBusObject::SyncReplyHandler(Message& msg, void* context)
 {
-    SyncReplyContext* ctx = reinterpret_cast<SyncReplyContext*>(context);
+    ManagedObj<SyncReplyContext>* ctx = reinterpret_cast<ManagedObj<SyncReplyContext>*> (context);
 
     /* Set the reply message */
-    ctx->replyMsg = msg;
+    (*ctx)->replyMsg = msg;
 
     /* Wake up sync method_call thread */
-    QStatus status = ctx->event.SetEvent();
+    QStatus status = (*ctx)->event.SetEvent();
     if (ER_OK != status) {
         QCC_LogError(status, ("SetEvent failed"));
     }
+    delete ctx;
 }
 
 QStatus ProxyBusObject::SecureConnection(bool forceAuth)
@@ -755,7 +765,9 @@ void ProxyBusObject::IntrospectMethodCB(Message& msg, void* context)
         ident += " : ";
         ident += msg->GetObjectPath();
         status = ParseXml(msg->GetArg(0)->v_string.str, ident.c_str());
-    } else if ((msg->GetType() == MESSAGE_ERROR) && (::strcmp("org.freedesktop.DBus.Error.ServiceUnknown", msg->GetErrorName()) == 0)) {
+    } else if ((msg->GetType() == MESSAGE_ERROR)
+               && (msg->GetErrorName() != NULL)
+               && (::strcmp("org.freedesktop.DBus.Error.ServiceUnknown", msg->GetErrorName()) == 0)) {
         status = ER_BUS_NO_SUCH_SERVICE;
     } else {
         status = ER_FAIL;

@@ -37,7 +37,7 @@
 #include "NullTransport.h"
 #include "AllJoynPeerObj.h"
 
-#define QCC_MODULE "ALLJOYN"
+#define QCC_MODULE "NULL_TRANSPORT"
 
 using namespace std;
 using namespace qcc;
@@ -98,10 +98,11 @@ class NullEndpoint : public BusEndpoint {
             /*
              * Register the endpoint with the client on receiving the first message from the daemon.
              */
-            if (!clientReady) {
+            if (IncrementAndFetch(&clientReady) == 1) {
                 QCC_DbgHLPrintf(("Registering null endpoint with client"));
                 clientBus.GetInternal().GetRouter().RegisterEndpoint(*this, false);
-                clientReady = true;
+            } else {
+                DecrementAndFetch(&clientReady);
             }
             msg->bus = &clientBus;
             status = clientBus.GetInternal().GetRouter().PushMessage(msg, *this);
@@ -111,13 +112,19 @@ class NullEndpoint : public BusEndpoint {
 
     const qcc::String& GetUniqueName() const { return uniqueName; }
 
-    uint32_t GetUserId() const { return -1; }
-    uint32_t GetGroupId() const { return -1; }
-    uint32_t GetProcessId() const { return -1; }
-    bool SupportsUnixIDs() const { return false; }
+    uint32_t GetUserId() const { return qcc::GetUid(); }
+    uint32_t GetGroupId() const { return qcc::GetGid(); }
+    uint32_t GetProcessId() const { return qcc::GetPid(); }
+    bool SupportsUnixIDs() const {
+#if defined(QCC_OS_WINDOWS)
+        return false;
+#else
+        return true;
+#endif
+    }
     bool AllowRemoteMessages() { return true; }
 
-    bool clientReady;
+    int32_t clientReady;
     BusAttachment& clientBus;
     BusAttachment& daemonBus;
 
@@ -127,7 +134,7 @@ class NullEndpoint : public BusEndpoint {
 
 NullEndpoint::NullEndpoint(BusAttachment& clientBus, BusAttachment& daemonBus) :
     BusEndpoint(ENDPOINT_TYPE_NULL),
-    clientReady(false),
+    clientReady(0),
     clientBus(clientBus),
     daemonBus(daemonBus)
 {
@@ -141,6 +148,7 @@ NullEndpoint::NullEndpoint(BusAttachment& clientBus, BusAttachment& daemonBus) :
 
 NullEndpoint::~NullEndpoint()
 {
+    QCC_DbgHLPrintf(("Destroying null endpoint %s", uniqueName.c_str()));
     clientBus.GetInternal().GetRouter().UnregisterEndpoint(*this);
     daemonBus.GetInternal().GetRouter().UnregisterEndpoint(*this);
 }

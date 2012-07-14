@@ -626,11 +626,12 @@ class NameService : public qcc::Thread {
     size_t NumAdvertisements() { return m_advertised.size(); }
 
     /**
-     * @brief Returns whether or not external network communication is enabled.
+     * @brief Returns whether or not external network communication is enabled
+     * (or enabling).
      *
      * @return Returns true if external communication is enabled, otherwise false.
      */
-    bool Enabled(void) { return m_enabled; }
+    bool Enabled(void) { return m_enabled || m_doEnable; }
 
   private:
     /**
@@ -962,6 +963,20 @@ class NameService : public qcc::Thread {
      * conformance.
      */
     bool m_enabled;
+
+    /**
+     * @internal
+     * @brief If set to true, request the name service run thread to enable
+     * communication with the outside world.
+     */
+    bool m_doEnable;
+
+    /**
+     * @internal
+     * @brief If set to true, request the name service run thread to disable
+     * communication with the outside world.
+     */
+    bool m_doDisable;
 };
 
 } // namespace ajn

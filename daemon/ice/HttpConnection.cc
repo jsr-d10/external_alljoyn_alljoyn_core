@@ -217,6 +217,12 @@ QStatus HttpConnection::Connect(SocketFd sock)
             SocketStream* sockStream = new SocketStream(sock);
             stream = sockStream;
             status = sockStream->Connect(hostIPAddress, port);
+
+            /* Retrieve the interface details over which the OS has
+             * set up the socket to talk to the Server */
+            uint16_t localPort;
+            qcc::GetLocalAddress(sockStream->GetSocketFd(), localIPAddress, localPort);
+
             httpSource.Reset(*stream);
             break;
         }
@@ -227,14 +233,21 @@ QStatus HttpConnection::Connect(SocketFd sock)
                 port = 443;
             }
 
-            SslSocket* sslSocket = new SslSocket(localIPAddress, host);
+            SslSocket* sslSocket = new SslSocket(host);
             stream = sslSocket;
             status = sslSocket->Connect(hostIPAddress, port);
+
+            /* Retrieve the interface details over which the OS has
+             * set up the socket to talk to the Server */
+            uint16_t localPort;
+            qcc::GetLocalAddress(sslSocket->GetSocketFd(), localIPAddress, localPort);
+
             httpSource.Reset(*stream);
 
             break;
         }
         }
+
     } else {
         QCC_DbgPrintf(("A connection with the Server already exists."));
     }
@@ -365,12 +378,13 @@ QStatus HttpConnection::ParseResponse(HTTPResponse& response)
 
                         /*We need to parse the payload only if we have a payload in the response*/
                         if (httpSource.GetContentLength() != 0) {
-                            char* buf = (char*)malloc(httpSource.GetContentLength());
+                            char* buf = (char*)malloc(httpSource.GetContentLength() + 1);
                             size_t reqBytes = httpSource.GetContentLength();
                             size_t actual;
                             status = httpSource.PullBytes(buf, reqBytes, actual);
 
                             if ((ER_OK == status) && (httpSource.GetContentLength() == actual)) {
+                                buf[actual] = '\0';
                                 string responseStr = string(buf);
 
                                 // Parse the payload using the JSON parser only of the HTTP status code received is

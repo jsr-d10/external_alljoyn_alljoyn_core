@@ -1,5 +1,5 @@
 /**
- * @file ICECandidatePair.cpp
+ * @file ICECandidatePair.cc
  *
  *
  */
@@ -251,8 +251,8 @@ void ICECandidatePair::Check(void)
         local->GetStunActivity()->stun->SetTurnAddr(remote->GetEndpoint().addr);
         local->GetStunActivity()->stun->SetTurnPort(remote->GetEndpoint().port);
         local->GetStunActivity()->stun->SendStunMessage(*msg,
-                                                        local->GetEndpoint().addr,
-                                                        local->GetEndpoint().port,
+                                                        remote->GetMappedAddress().addr,
+                                                        remote->GetMappedAddress().port,
                                                         true);
     } else {
         local->GetStunActivity()->stun->SendStunMessage(*msg,
@@ -260,8 +260,6 @@ void ICECandidatePair::Check(void)
                                                         remote->GetEndpoint().port,
                                                         local->GetType() == _ICECandidate::Relayed_Candidate);
     }
-
-    // PPN - may need to add case for server/peer reflexive candidate
 
     delete msg;
 

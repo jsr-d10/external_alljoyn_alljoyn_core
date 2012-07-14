@@ -37,15 +37,15 @@
 #include "BusEndpoint.h"
 #include "VirtualEndpoint.h"
 
-#if defined(__GNUC__) && !defined(ANDROID)
-#include <ext/hash_map>
-namespace std {
-using namespace __gnu_cxx;
-}
-#else
-#include <hash_map>
-#endif
-
+#include <qcc/STLContainer.h>
+//#if defined(__GNUC__) && !defined(ANDROID)
+//#include <ext/hash_map>
+//namespace std {
+//using namespace __gnu_cxx;
+//}
+//#else
+//#include <hash_map>
+//#endif
 namespace ajn {
 
 /** @internal Forward reference */
@@ -221,9 +221,12 @@ class NameTable {
         uint32_t flags;
     } NameQueueEntry;
 
+    /**
+     * Hash functor
+     */
     struct Hash {
         inline size_t operator()(const qcc::String& s) const {
-            return std::hash<const char*>() (s.c_str());
+            return qcc::hash_string(s.c_str());
         }
     };
 
@@ -234,8 +237,8 @@ class NameTable {
     };
 
     mutable qcc::Mutex lock;                                             /**< Lock protecting name tables */
-    std::hash_map<qcc::String, BusEndpoint*, Hash, Equal> uniqueNames;   /**< Unique name table */
-    std::hash_map<qcc::String, std::deque<NameQueueEntry>, Hash, Equal> aliasNames;  /**< Alias name table */
+    unordered_map<qcc::String, BusEndpoint*, Hash, Equal> uniqueNames;   /**< Unique name table */
+    unordered_map<qcc::String, std::deque<NameQueueEntry>, Hash, Equal> aliasNames;  /**< Alias name table */
     uint32_t uniqueId;
     qcc::String uniquePrefix;
     std::vector<NameListener*> listeners;                              /**< Listeners regsitered with name table */

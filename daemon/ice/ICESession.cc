@@ -1,5 +1,5 @@
 /**
- * @file ICESession.cpp
+ * @file ICESession.cc
  * ICESession is responsible for ...
  *
  */
@@ -179,7 +179,7 @@ void ICESession::ComposeAndEnqueueStunRequest(Stun* stun, Retransmit* gatherRetr
                    msg->MessageClassToString(msg->GetTypeClass()).c_str(),
                    tid.ToString().c_str()));
 
-    msg->AddAttribute(new StunAttributeSoftware("AllJoyn " + String(GetVersion())));
+    msg->AddAttribute(new StunAttributeSoftware(String("AllJoyn ") + String(GetVersion())));
 
     msg->AddAttribute(new StunAttributeUsername(usernameForShortTermCredential));
 
@@ -229,7 +229,7 @@ void ICESession::EnqueueTurnRefresh(StunActivity* stunActivity)
                               tid);
     }
 
-    msg->AddAttribute(new StunAttributeSoftware("AllJoyn " + String(GetVersion())));
+    msg->AddAttribute(new StunAttributeSoftware(String("AllJoyn ") + String(GetVersion())));
 
     if (retransmit.GetState() == Retransmit::ReceivedAuthenticateResponse) {
         msg->AddAttribute(new StunAttributeUsername(usernameForShortTermCredential));
@@ -362,9 +362,9 @@ void ICESession::AssignPriorities(void)
 
 uint32_t ICESession::AssignPriority(uint16_t componentID,
                                     const ICECandidate& IceCandidate,
-                                    _ICECandidate::ICECandidateType candidateType,
-                                    String interfaceName)
+                                    _ICECandidate::ICECandidateType candidateType)
 {
+    QCC_DbgPrintf(("ICESession::AssignPriority(): OnDemandAddress(%s) PersistentAddress(%s)", OnDemandAddress.ToString().c_str(), PersistentAddress.ToString().c_str()));
     uint16_t typePreference = 0;
     uint16_t localPreference = 0;
 
@@ -410,16 +410,13 @@ uint32_t ICESession::AssignPriority(uint16_t componentID,
             }
         }
 
-        // Update localPreference based on interface type in the following priority order
-        // Ethernet
-        // Wi-Fi
-        // Mobile Network
-        if (interfaceName.find(ethernetInterfaceName) != String::npos) {
+        // Bump up the priority of the interfaces that have been used for connection with the Rendezvous
+        // Server
+        if ((IceCandidate->GetBase().addr == OnDemandAddress) ||
+            (IceCandidate->GetBase().addr == PersistentAddress)) {
+            QCC_DbgPrintf(("ICESession::AssignPriority(): Bumping up the priority of candidate with IP Addr %s as it is "
+                           "used in the Rendezvous Connection", IceCandidate->GetBase().addr.ToString().c_str()));
             localPreference += 25535;
-        } else if (interfaceName.find(wifiInterfaceName) != String::npos) {
-            localPreference += 20000;
-        } else if (interfaceName.find(mobileNwInterfaceName) != String::npos) {
-            localPreference += 0;
         }
     }
 
@@ -437,7 +434,7 @@ void ICESession::AssignPrioritiesPerICEStream(const ICEStream* stream)
 
         Component::iterator candidateIt;
         for (candidateIt = (*componentIt)->Begin(); candidateIt != (*componentIt)->End(); ++candidateIt) {
-            (*candidateIt)->SetPriority(AssignPriority((*componentIt)->GetID(), *candidateIt, (*candidateIt)->GetType(), (*candidateIt)->GetInterfaceName()));
+            (*candidateIt)->SetPriority(AssignPriority((*componentIt)->GetID(), *candidateIt, (*candidateIt)->GetType()));
         }
     }
 }
@@ -995,9 +992,11 @@ QStatus ICESession::StartStunTurnPacingThread(void)
     return status;
 }
 
-QStatus ICESession::GatherHostCandidates(void)
+QStatus ICESession::GatherHostCandidates(bool enableIpv6)
 {
     QStatus status = ER_OK;
+
+    QCC_DbgPrintf(("ICESession::GatherHostCandidates(): enableIpv6 = %d", enableIpv6));
 
     uint16_t streamIndex = 0;
     SocketType socketType = QCC_SOCK_DGRAM;
@@ -1028,10 +1027,15 @@ QStatus ICESession::GatherHostCandidates(void)
 
         for (networkInterfaceIter = AdapterUtil::GetAdapterUtil()->Begin(); networkInterfaceIter != AdapterUtil::GetAdapterUtil()->End(); ++networkInterfaceIter) {
 
-            QCC_DbgPrintf(("network adapter = %s", networkInterfaceIter->addr.ToString().c_str()));
+            QCC_DbgPrintf(("network adapter = %s networkInterfaceIter->addr.IsIPv6() = %d", networkInterfaceIter->addr.ToString().c_str(), networkInterfaceIter->addr.IsIPv6()));
+
+            // Ignore IPv6 interfaces if IPv6 support is disabled
+            if ((!enableIpv6) && (networkInterfaceIter->addr.IsIPv6())) {
+                continue;
+            }
 
             // (This typically ignores the specified port and OS binds to ephemeral port.)
-            status = component->CreateHostCandidate(socketType, networkInterfaceIter->addr, port, networkInterfaceIter->name);
+            status = component->CreateHostCandidate(socketType, networkInterfaceIter->addr, port);
 
             if (status != ER_OK) {
                 QCC_LogError(status, ("component->CreateHostCandidate"));
@@ -1040,7 +1044,7 @@ QStatus ICESession::GatherHostCandidates(void)
 
             if (NULL != implicitComponent) {
                 // (This typically ignores the specified port and OS binds to ephemeral port.)
-                status = implicitComponent->CreateHostCandidate(socketType, networkInterfaceIter->addr, port + 1, networkInterfaceIter->name);
+                status = implicitComponent->CreateHostCandidate(socketType, networkInterfaceIter->addr, port + 1);
 
                 if (status != ER_OK) {
                     QCC_LogError(status, ("implicitComponent->CreateHostCandidate"));
@@ -1055,7 +1059,7 @@ QStatus ICESession::GatherHostCandidates(void)
     return status;
 }
 
-QStatus ICESession::Init(void)
+QStatus ICESession::Init(bool enableIpv6)
 {
     QStatus status = ER_OK;
 
@@ -1066,7 +1070,7 @@ QStatus ICESession::Init(void)
     }
 
     // Gather candidates for host
-    status = GatherHostCandidates();
+    status = GatherHostCandidates(enableIpv6);
     if (ER_OK != status) {
         QCC_LogError(status, ("GatherHostCandidates()"));
         goto exit;
@@ -1206,7 +1210,6 @@ QStatus ICESession::FormCheckLists(list<ICECandidates>& peerCandidates, String i
         ComponentID remoteComponentID = peerCandidates.front().componentID;
         ICECandidate remoteCandidate;
 
-
         for (localCandidatesIter = localICEStreamCandidates.begin();
              localCandidatesIter != localICEStreamCandidates.end();
              localCandidatesIter++) {
@@ -1225,6 +1228,18 @@ QStatus ICESession::FormCheckLists(list<ICECandidates>& peerCandidates, String i
                                                    remotePriority,
                                                    remoteFoundation);
 
+                    if (remoteCandidateType == _ICECandidate::Relayed_Candidate) {
+                        IPEndpoint remoteMappedEndpoint;
+                        remoteMappedEndpoint.addr = peerCandidates.front().raddress;
+                        remoteMappedEndpoint.port = peerCandidates.front().rport;
+                        remoteCandidate->SetMappedAddress(remoteMappedEndpoint);
+                    } else if (remoteCandidateType == _ICECandidate::ServerReflexive_Candidate) {
+                        IPEndpoint remoteMappedEndpoint;
+                        remoteMappedEndpoint.addr = peerCandidates.front().address;
+                        remoteMappedEndpoint.port = peerCandidates.front().port;
+                        remoteCandidate->SetMappedAddress(remoteMappedEndpoint);
+                    }
+
                     streamList[0]->AddRemoteCandidate(remoteCandidate);
                 }
 
@@ -1239,7 +1254,7 @@ QStatus ICESession::FormCheckLists(list<ICECandidates>& peerCandidates, String i
                 uint64_t controlTieBreaker = 0;
                 Crypto_GetRandomBytes(reinterpret_cast<uint8_t*>(&controlTieBreaker), sizeof(controlTieBreaker));
 
-                uint32_t bindRequestPriority = AssignPriority(localCandidate->GetComponent()->GetID(), localCandidate, _ICECandidate::PeerReflexive_Candidate, localCandidate->GetInterfaceName());
+                uint32_t bindRequestPriority = AssignPriority(localCandidate->GetComponent()->GetID(), localCandidate, _ICECandidate::PeerReflexive_Candidate);
                 status = pair->InitChecker(controlTieBreaker, useAggressiveNomination, bindRequestPriority);
                 if (ER_OK != status) {
                     delete pair;
@@ -1328,12 +1343,16 @@ void ICESession::SetTurnPermissions(void)
 {
     stream_iterator streamIt;
     for (streamIt = Begin(); streamIt != End(); ++streamIt) {
-        ICEStream::const_iterator componentIt;
-        for (componentIt = (*streamIt)->Begin(); componentIt != (*streamIt)->End(); ++componentIt) {
-            Component::iterator candidateIt;
-            for (candidateIt = (*componentIt)->Begin(); candidateIt != (*componentIt)->End(); ++candidateIt) {
-                if ((*candidateIt)->GetType() == _ICECandidate::Relayed_Candidate) {
-                    EnqueueTurnCreatePermissions(*candidateIt);
+        /* We should enque the TURN create permission only if we have something to check. i.e. the
+         * checklist in the stream is non-empty */
+        if (!((*streamIt)->CheckListEmpty())) {
+            ICEStream::const_iterator componentIt;
+            for (componentIt = (*streamIt)->Begin(); componentIt != (*streamIt)->End(); ++componentIt) {
+                Component::iterator candidateIt;
+                for (candidateIt = (*componentIt)->Begin(); candidateIt != (*componentIt)->End(); ++candidateIt) {
+                    if ((*candidateIt)->GetType() == _ICECandidate::Relayed_Candidate) {
+                        EnqueueTurnCreatePermissions(*candidateIt);
+                    }
                 }
             }
         }
@@ -1349,6 +1368,7 @@ void ICESession::UpdateICEStreamStates(void)
     bool atLeastOneIsRunning = false;
 
     stream_iterator streamIt;
+    QCC_DbgTrace(("ICESession::UpdateICEStreamStates"));
 
     for (streamIt = Begin(); streamIt != End(); ++streamIt) {
         ICEStream::ICEStreamCheckListState checkListState = (*streamIt)->GetCheckListState();
@@ -1589,11 +1609,13 @@ void ICESession::GetSelectedCandidatePairList(vector<ICECandidatePair*>& selecte
     // walk list and display
     vector<ICECandidatePair*>::iterator iter;
     for (iter = selectedCandidatePairList.begin(); iter != selectedCandidatePairList.end(); ++iter) {
-        QCC_DbgPrintf(("SelectedPair: local %s:%d remote %s:%d",
+        QCC_DbgPrintf(("SelectedPair: local %s:%d (%s) remote %s:%d (%s)",
                        (*iter)->local->GetEndpoint().addr.ToString().c_str(),
                        (*iter)->local->GetEndpoint().port,
+                       (*iter)->local->GetTypeString().c_str(),
                        (*iter)->remote->GetEndpoint().addr.ToString().c_str(),
-                       (*iter)->remote->GetEndpoint().port));
+                       (*iter)->remote->GetEndpoint().port,
+                       (*iter)->remote->GetTypeString().c_str()));
     }
 
 }

@@ -29,7 +29,7 @@ static const unsigned int release = 0;
 
 
 static const char version[] = "v2.5.0";
-static const char build[] = "Alljoyn Library v2.5.0 (Built Tue Jun 05 00:16:22 UTC 2012 on sea-ajnu1010-c by seabuild - Git branch: '(no branch)' tag: 'R02.05.00c2' (+0 changes) commit ref: 2993cd46a8fae0f7352baf35264b1102c8ab472a)";
+static const char build[] = "Alljoyn Library v2.5.0 (Built Fri Jul 13 08:12:42 UTC 2012 on sea-ajnu1010-c by seabuild - Git branch: 'B02.05.00' tag: 'R02.05.00c4' (+0 changes) commit ref: 0c6b1cc79241269013355e55b9337c8e9d46329a)";
 
 const char * ajn::GetVersion()
 {

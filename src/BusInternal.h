@@ -30,6 +30,7 @@
 #include <qcc/String.h>
 #include <qcc/Event.h>
 #include <qcc/atomic.h>
+#include <qcc/ManagedObj.h>
 
 #include <alljoyn/BusAttachment.h>
 #include <alljoyn/InterfaceDescription.h>
@@ -41,15 +42,12 @@
 #include "Transport.h"
 #include "TransportList.h"
 #include "CompressionRules.h"
-#include "ProtectedBusListener.h"
-#include "ProtectedSessionListener.h"
-#include "ProtectedSessionPortListener.h"
 
 #include <Status.h>
 
 namespace ajn {
 
-class BusAttachment::Internal : public MessageReceiver, public qcc::AlarmListener {
+class BusAttachment::Internal : public MessageReceiver {
     friend class BusAttachment;
 
   public:
@@ -138,11 +136,6 @@ class BusAttachment::Internal : public MessageReceiver, public qcc::AlarmListene
     qcc::Timer& GetTimer() { return timer; }
 
     /**
-     * Get the dispatcher
-     */
-    qcc::Timer& GetDispatcher() { return dispatcher; }
-
-    /**
      * Constructor called by BusAttachment.
      */
     Internal(const char* appName,
@@ -168,11 +161,6 @@ class BusAttachment::Internal : public MessageReceiver, public qcc::AlarmListene
      * A generic signal handler for AllJoyn signals
      */
     void AllJoynSignalHandler(const InterfaceDescription::Member* member, const char* srcPath, Message& message);
-
-    /**
-     * Function called when an alarm is triggered.
-     */
-    void AlarmTriggered(const qcc::Alarm& alarm, QStatus reason);
 
     /**
      * Indicate whether endpoints of this attachment are allowed to receive messages
@@ -217,46 +205,19 @@ class BusAttachment::Internal : public MessageReceiver, public qcc::AlarmListene
     QStatus SetSessionListener(SessionId id, SessionListener* listener);
 
     /**
-     * This function puts a message on the dispatch thread and deliver it to the specified alarm listener.
-     *
-     * @param listener  The alarm listener to receive the message.
-     * @param msg       The message to queue
-     * @param context   User defined context.
-     * @param delay     Time to delay before delivering the message.
-     */
-    QStatus DispatchMessage(AlarmListener& listener, Message& msg, void* context, uint32_t delay = 0);
-
-    /**
-     * This function puts a caller specified context on the dispatch thread and deliver it to the specified alarm listener.
-     *
-     * @param listener  The alarm listener to receive the context.
-     * @param context   The context to queue
-     * @param delay     Time to delay before delivering the message.
-     */
-    QStatus Dispatch(AlarmListener& listener, void* context, uint32_t delay = 0);
-
-    /**
-     * Remove all dispatcher references to a given AlarmListner.
-     *
-     * @param listener   AlarmListener whose refs will be removed.
-     */
-    void RemoveDispatchListener(AlarmListener& listener);
-
-    /**
      * Called if the bus attachment become disconnected from the bus.
      */
     void LocalEndpointDisconnected();
 
     /**
-     * JoinSession method_reply handler.
+     * JoinSessionAsync method_reply handler.
      */
-    void JoinSessionMethodCB(Message& message, void* context);
+    void JoinSessionAsyncCB(Message& message, void* context);
 
     /**
-     * Dispatched joinSession method_reply handler.
+     * SetLinkTimeoutAsync method_reply handler.
      */
-    void DoJoinSessionMethodCB(Message& message, void* context);
-
+    void SetLinkTimeoutAsyncCB(Message& message, void* context);
 
   private:
 
@@ -278,12 +239,11 @@ class BusAttachment::Internal : public MessageReceiver, public qcc::AlarmListene
 
     qcc::String application;              /* Name of the that owns the BusAttachment application */
     BusAttachment& bus;                   /* Reference back to the bus attachment that owns this state */
-    qcc::Mutex listenersLock;             /* Mutex that protects BusListeners vector */
-    typedef std::list<ProtectedBusListener*> ListenerList;
-    ListenerList listeners;               /* List of registered BusListeners */
 
-    typedef std::map<BusListener*, ListenerList::iterator> ListenerMap;
-    ListenerMap listenerMap;
+    qcc::Mutex listenersLock;             /* Mutex that protects BusListeners container (set) */
+    typedef qcc::ManagedObj<BusListener*> ProtectedBusListener;
+    typedef std::set<ProtectedBusListener> ListenerSet;
+    ListenerSet listeners;               /* List of registered BusListeners */
 
     TransportList transportList;          /* List of active transports */
     KeyStore keyStore;                    /* The key store for the bus attachment */
@@ -297,18 +257,20 @@ class BusAttachment::Internal : public MessageReceiver, public qcc::AlarmListene
     std::map<qcc::StringMapKey, InterfaceDescription> ifaceDescriptions;
 
     qcc::Timer timer;                     /* Timer used for various timeouts such as method replies */
-    qcc::Timer dispatcher;                /* Dispatcher used for org.alljoyn.Bus signal triggered bus listener callbacks */
     bool allowRemoteMessages;             /* true iff endpoints of this attachment can receive messages from remote devices */
     qcc::String listenAddresses;          /* The set of bus addresses that this bus can listen on. (empty for clients) */
     qcc::Mutex stopLock;                  /* Protects BusAttachement::Stop from being reentered */
     int32_t stopCount;                    /* Number of caller's blocked in BusAttachment::Stop() */
 
-    std::map<SessionPort, ProtectedSessionPortListener*> sessionPortListeners;  /* Lookup SessionPortListener by session port */
-    typedef std::map<SessionId, ProtectedSessionListener*> SessionListenerMap;
-    SessionListenerMap sessionListeners;            /* Lookup SessionListener by session id */
+    typedef qcc::ManagedObj<SessionPortListener*> ProtectedSessionPortListener;
+    typedef std::map<SessionPort, ProtectedSessionPortListener> SessionPortListenerMap;
+    SessionPortListenerMap sessionPortListeners;  /* Lookup SessionPortListener by session port */
 
+    typedef qcc::ManagedObj<SessionListener*> ProtectedSessionListener;
+    typedef std::map<SessionId, ProtectedSessionListener> SessionListenerMap;
+    SessionListenerMap sessionListeners;   /* Lookup SessionListener by session id */
 
-    qcc::Mutex sessionListenersLock;                                   /* Lock protecting sessionListners maps */
+    qcc::Mutex sessionListenersLock;       /* Lock protecting sessionListners maps */
 };
 
 }

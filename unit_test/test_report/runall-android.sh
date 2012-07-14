@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2010 - 2012, Qualcomm Innovation Center, Inc.
+# Copyright 2012, Qualcomm Innovation Center, Inc.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License");
 #    you may not use this file except in compliance with the License.
@@ -18,9 +18,9 @@
 function Usage() {
 	set +ex
 	echo >&2 "
-Runs GTest executables created by scons in alljoyn_core and common.
+Runs GTest executables created by scons in alljoyn_core and common, on an Android device using adb.
 
-Usage: $(basename -- "$0") [ -s -d alljoyn_dist ] [ -t alljoyn_test ] [-c configfile ] [ ajtest ] [ cmtest ] ...
+Usage: $(basename -- "$0") [ -s -d alljoyn_dist ] [ -t alljoyn_test ] [-c configfile ] -- \"adb device\" [ ajtest ] [ cmtest ] ...
 where
 	-s		# start and stop our own AllJoyn-Daemon (default internal transport address, --no-bt)
 	-d alljoyn_dist	# path to the build/.../dist tree, used to find bin/alljoyn-daemon exe, if used
@@ -28,7 +28,8 @@ where
 			# Note: do not include the 'bin' subdirectory in alljoyn_dist or alljoyn_test
 	-c configfile	# name of config file(s) (an embedded wildcard is replaced by the gtest test name)
 			#	default '*.conf'
-	ajtest, cmtest	# simple file name(s) of the gtest exe(s) to be run (found in -t path/bin)
+        \"adb device\"    # string needed by adb to contact the device, like \"-s XXXXXXX\" (use quotes if necessary)
+	ajtest, cmtest	# simple file name(s) of the gtest exe(s) to be run (gtest exe files expected in -t path/bin)
 			#	default runs ajtest and cmtest
 "
 	exit 2
@@ -55,18 +56,44 @@ do
 	esac
 done
 
+device=''
 gtests=''
 if test "$OPTIND" -gt 0 -a "$OPTIND" -le $#
 then
 	shift ` expr $OPTIND - 1 `
 	while test $# -ge 1
 	do
-		case "$1" in
-		( *[!a-zA-Z0-9_-]* | '' ) echo >&2 "error, $1:  allowed characters are [a-zA-Z0-9_-]" ; Usage ;;
-		( * ) gtests="$gtests $1" ;;
+		case "$device" in
+		( '' )
+			case "$1" in
+			( *[!\ a-zA-Z0-9_-]* | '' )
+				echo >&2 "error, $1:  allowed characters are [\ a-zA-Z0-9_-]"
+				Usage
+				;;
+			( * )
+				device="$1"
+                        	;;
+			esac
+			;;
+		( * )
+			case "$1" in
+			( *[!a-zA-Z0-9_-]* | '' )
+				echo >&2 "error, $1:  allowed characters are [a-zA-Z0-9_-]"
+				Usage
+				;;
+			( * )
+				gtests="$gtests $1"
+                        	;;
+			esac
+			;;
 		esac
 		shift
 	done
+fi
+
+if test -z "$device"
+then
+	echo >&2 'error, "adb device" argument is required' ; Usage
 fi
 
 if test -z "$gtests"
@@ -105,17 +132,7 @@ ckbin() {
 ckbin alljoyn_dist daemon_bin
 ckbin alljoyn_test gtest_bin
 
-if cygpath -wa . > /dev/null 2>&1
-then
-	# found Cygwin, which means Windows
-	# alljoyn-daemon options are different
-	options='--no-bt --verbosity=5'
-	# gtest_bin needs to be Windows-style because we use pure Windows Python, not Cygwin Python
-	gtest_bin_p="$( cygpath -wa "$gtest_bin" )"
-else
-	options='--internal --no-bt --verbosity=5'
-	gtest_bin_p="$gtest_bin"
-fi
+options='--internal --no-bt --verbosity=5'
 
 echo "# runall test plan:"
 if $start_daemon
@@ -138,32 +155,39 @@ do
 		echo >&2 "error, configfile $c not found"
 		exit 2
 	}
-	echo "# python test_harness.py -c $c -t $i -p $gtest_bin_p > $i.log"
+	echo "# python test_harness.py -c $c -t $i -p $gtest_bin > $i.log"
 done
+
+kill-alljoyn() {
+
+	: kill any alljoyn processes running on device
+
+	p=$( adb < /dev/null $device shell ps | awk '$NF ~ /alljoyn/ { print $2; exit; }' )
+	while test -n "$p"
+	do
+		adb < /dev/null $device shell kill -9 $p
+		sleep 5
+		p=$( adb < /dev/null $device shell ps | awk '$NF ~ /alljoyn/ { print $2; exit; }' )
+	done
+}
 
 : begin
 
-export ER_DEBUG_ALL=0
+kill-alljoyn || : ok
 
 if $start_daemon
 then
-
 	: start alljoyn-daemon
 
 	rm -f alljoyn-daemon.log
 
-	killall -v alljoyn-daemon || : ok
+	adb < /dev/null $device shell mkdir                       /data/alljoyn || : ok
+	adb < /dev/null $device shell rm                          /data/alljoyn/alljoyn-daemon || : ok
+	adb < /dev/null $device push "$daemon_bin/alljoyn-daemon" /data/alljoyn
 	(
-		set -ex
-		cd "$daemon_bin"
-		pwd
 		date
-
-		./alljoyn-daemon $options; xit=$?
-
+		adb < /dev/null $device shell                             /data/alljoyn/alljoyn-daemon $options
 		date
-		set +x
-		echo exit status $xit
 	) > alljoyn-daemon.log 2>&1 </dev/null &
 
 	sleep 5
@@ -177,29 +201,38 @@ do
 	# configfile for gtest $i
 	c="$( echo "$configfile" | sed -e 's,\*,'$i',g' )"
 
-	rm -f "$i.log"
+	rm -f $i.adb-sh
+	python < /dev/null -u test_harness-android.py -c $c -t $i -o $i.adb-sh -p /data/alljoyn
 
-	sleep 5
-	set -x
+	: setup $i
+
+	rm -f $i.log $i.xml
+
+	adb < /dev/null $device shell mkdir          /data/alljoyn || : ok
+	adb < /dev/null $device shell rm             /data/alljoyn/$i || : ok
+	adb < /dev/null $device shell rm             /data/alljoyn/$i.adb-sh || : ok
+	adb < /dev/null $device shell rm             /data/alljoyn/$i.xml    || : ok
+	adb < /dev/null $device push "$gtest_bin/$i" /data/alljoyn
+	adb < /dev/null $device push $i.adb-sh       /data/alljoyn
+
 	: run $i
 
-	date
-	python -u test_harness.py -c $c -t $i -p "$gtest_bin_p" > "$i.log" 2>&1 < /dev/null || {
-		xit=$?
-		case $xit in (1) : tests failed in $i ;; (*) : system error in $i ;; esac
-	}
-	date
+	adb < /dev/null $device shell sh /data/alljoyn/$i.adb-sh > $i.log 2>&1
+        tail -1 $i.log | grep "exiting with status 0" || xit=1
 
-	set +x
+        case "$xit" in
+        0 ) echo $i PASSED ;;
+        * ) echo $i FAILED, see $i.log for info ;;
+        esac
+
+	: get xml file, maybe
+
+	adb < /dev/null $device pull  /data/alljoyn/$i.xml || : ok
+
 	sleep 5
 done
 
-if $start_daemon
-then
-	sleep 5
-	killall -v alljoyn-daemon || : ok
-	sleep 5
-fi
+kill-alljoyn || : ok
 
 echo exit status $xit
 exit $xit

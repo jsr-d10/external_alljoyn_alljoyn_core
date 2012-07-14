@@ -47,6 +47,7 @@ class BusEndpoint;
  * %BusAttachment is the top-level object responsible for connecting to and optionally managing a message bus.
  */
 class BusAttachment : public MessageReceiver {
+
   public:
 
     /**
@@ -69,6 +70,24 @@ class BusAttachment : public MessageReceiver {
     };
 
     /**
+     * Pure virtual base class implemented by classes that wish to call SetLinkTimeoutAsync().
+     */
+    class SetLinkTimeoutAsyncCB {
+      public:
+        /** Destructor */
+        virtual ~SetLinkTimeoutAsyncCB() { }
+
+        /**
+         * Called when SetLinkTimeoutAsync() completes.
+         *
+         * @param status       ER_OK if successful
+         * @param timeout      Timeout value (possibly adjusted from original request).
+         * @param context      User defined context which will be passed as-is to callback.
+         */
+        virtual void SetLinkTimeoutCB(QStatus status, uint32_t timeout, void* context) = 0;
+    };
+
+    /**
      * Construct a BusAttachment.
      *
      * @param applicationName       Name of the application.
@@ -86,6 +105,13 @@ class BusAttachment : public MessageReceiver {
      * @return The maximum number of concurrent method and signal handlers.
      */
     uint32_t GetConcurrency();
+
+    /**
+     * Allow the currently executing method/signal handler to enable concurrent callbacks
+     * during the scope of the handler's execution.
+     *
+     */
+    void EnableConcurrentCallbacks();
 
     /**
      * Create an interface description with a given name.
@@ -891,6 +917,37 @@ class BusAttachment : public MessageReceiver {
      */
     QStatus SetLinkTimeout(SessionId sessionid, uint32_t& linkTimeout);
 
+
+    /**
+     * Set the link timeout for a session.
+     *
+     * Link timeout is the maximum number of seconds that an unresponsive daemon-to-daemon connection
+     * will be monitored before declaring the session lost (via SessionLost callback). Link timeout
+     * defaults to 0 which indicates that AllJoyn link monitoring is disabled.
+     *
+     * Each transport type defines a lower bound on link timeout to avoid defeating transport
+     * specific power management algorithms.
+     *
+     * This call executes asynchronously. When the JoinSession response is received, the callback will be called.
+     *
+     * @param[in] sessionid     Id of session whose link timeout will be modified.
+     * @param[in] linkTimeout   Max number of seconds that a link can be unresponsive before being
+     *                          declared lost. 0 indicates that AllJoyn link monitoring will be disabled. On
+     *                          return, this value will be the resulting (possibly upward) adjusted linkTimeout
+     *                          value that acceptable to the underlying transport.
+     * @param[in]  callback     Called when SetLinkTimeout response is received.
+     * @param[in]  context      User defined context which will be passed as-is to callback.
+     *
+     * @return
+     *      - #ER_OK iff method call to local daemon response was was successful.
+     *      - #ER_BUS_NOT_CONNECTED if a connection has not been made with a local bus.
+     *      - Other error status codes indicating a failure.
+     */
+    QStatus SetLinkTimeoutAsync(SessionId sessionid,
+                                uint32_t linkTimeout,
+                                BusAttachment::SetLinkTimeoutAsyncCB* callback,
+                                void* context = NULL);
+
     /**
      * Determine whether a given well-known name exists on the bus.
      * This method is a shortcut/helper that issues an org.freedesktop.DBus.NameHasOwner method call to the daemon
@@ -1030,6 +1087,16 @@ class BusAttachment : public MessageReceiver {
      * Try connect to the daemon with the spec.
      */
     QStatus TryConnect(const char* connectSpec, BusEndpoint** newep);
+
+    /**
+     * Validate the response to SetLinkTimeout
+     */
+    QStatus GetLinkTimeoutResponse(Message& reply, uint32_t& timeout);
+
+    /**
+     * Validate the response to JoinSession
+     */
+    QStatus GetJoinSessionResponse(Message& reply, SessionId& sessionId, SessionOpts& opts);
 
     qcc::String connectSpec;  /**< The connect spec used to connect to the bus */
     bool hasStarted;          /**< Indicates if the bus has ever been started */

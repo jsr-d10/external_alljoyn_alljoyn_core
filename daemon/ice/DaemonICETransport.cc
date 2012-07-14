@@ -20,6 +20,9 @@
  ******************************************************************************/
 
 #include <qcc/platform.h>
+
+#include <list>
+
 #include <qcc/IPAddress.h>
 #include <qcc/Socket.h>
 #include <qcc/SocketStream.h>
@@ -70,26 +73,6 @@ const char* DaemonICETransport::TransportName = "ice";
  */
 class DaemonICEEndpoint : public RemoteEndpoint {
   public:
-
-    /* Byte sent from the service end to the client end to tell the client that the
-     * service side is ready to accept the PacketEngine connect request from the client */
-    /*PPN - Review duration*/
-    static const uint8_t ISSUE_PACKET_ENGINE_CONNECT_COMMAND = 0xAA;
-
-    /* Timeout within which the ISSUE_PACKET_ENGINE_CONNECT_COMMAND should be received by the
-     * client */
-    /*PPN - Review duration*/
-    static const uint32_t PACKET_ENGINE_CONNECT_COMMAND_RECEIVE_TIMEOUT = 30000;
-
-    /* Timeout within which the Connect/Accept callback should be received after issuing
-     * PacketEngine connect/accept */
-    /*PPN - Review duration*/
-    static const uint32_t PACKET_ENGINE_CONNECT_AND_ACCEPT_TIMEOUT = 60000;
-
-    /* Timeout within which the packet engine disconnect callback should be received after issuing
-     * PacketEngine disconnect */
-    /*PPN - Review duration*/
-    static const uint32_t PACKET_ENGINE_DISCONNECT_TIMEOUT = 8000;
 
     /**
      * There are three threads that can be running around in this data
@@ -375,7 +358,7 @@ void* DaemonICEEndpoint::AuthThread::Run(void* arg)
      * with state = AUTH_FAILED or state = AUTH_SUCCEEDED.
      */
     uint8_t byte = 'x';
-    size_t nbytes;
+    size_t nbytes = 0;
 
     /*
      * Eat the first byte of the stream.  This is required to be zero by the
@@ -484,7 +467,7 @@ QStatus DaemonICEEndpoint::PacketEngineConnect(const IPAddress& addr, uint16_t p
         return status;
     }
 
-    status = Event::Wait(waitEvt, PACKET_ENGINE_CONNECT_AND_ACCEPT_TIMEOUT);
+    status = Event::Wait(waitEvt);
     if (status != ER_OK) {
         m_authState = AUTH_FAILED;
         QCC_LogError(status, ("DaemonICEEndpoint::AuthThread::Run(): Timed-out or failed wait on m_pktEngineConnectEvent"));
@@ -517,28 +500,21 @@ QStatus DaemonICEEndpoint::PacketEngineConnect(const IPAddress& addr, uint16_t p
 }
 
 
-DaemonICETransport::DaemonICETransport(BusAttachment& bus)
-    : Thread("DaemonICETransport"),
+DaemonICETransport::DaemonICETransport(BusAttachment& bus) :
+    Thread("DaemonICETransport"),
     m_bus(bus),
     m_dm(0),
+    m_iceManager(),
     m_stopping(false),
     m_listener(0),
     m_packetEngine("ice_packet_engine"),
-    m_iceCallback(m_listener, this),
-    ethernetInterfaceName(),
-    wifiInterfaceName(),
-    mobileNwInterfaceName()
+    m_iceCallback(m_listener, this)
 {
     /*
      * We know we are daemon code, so we'd better be running with a daemon
      * router.  This is assumed elsewhere.
      */
     assert(m_bus.GetInternal().GetRouter().IsDaemon());
-
-    /*
-     * Instantiate the ICE Manager
-     */
-    m_iceManager = ICEManager::GetInstance();
 
     /* Start the daemonICETransportTimer which is used to handle all the alarms */
     daemonICETransportTimer.Start();
@@ -561,15 +537,18 @@ DaemonICETransport::~DaemonICETransport()
     }
     allocateICESessionThreadsLock.Unlock(MUTEX_CONTEXT);
 
+    /* Make sure all threads are safely gone */
     Stop();
     Join();
 
-    /* Stop the daemonICETransportTimer which is used to handle all the alarms */
-    daemonICETransportTimer.Stop();
-
-    /* Deallocate the ICE manager */
-    delete m_iceManager;
-    m_iceManager = NULL;
+    /* Deregister  packetStreams from packetEngine before packetStreams are destroyed */
+    pktStreamMapLock.Lock();
+    map<String, pair<ICEPacketStream, int32_t> >::iterator pit = pktStreamMap.begin();
+    while (pit != pktStreamMap.end()) {
+        m_packetEngine.RemovePacketStream(pit->second.first);
+        ++pit;
+    }
+    pktStreamMapLock.Unlock();
 
     delete m_dm;
     m_dm = NULL;
@@ -592,7 +571,7 @@ void DaemonICETransport::Authenticated(DaemonICEEndpoint* conn)
      */
     m_endpointListLock.Lock(MUTEX_CONTEXT);
 
-    list<DaemonICEEndpoint*>::iterator i = find(m_authList.begin(), m_authList.end(), conn);
+    set<DaemonICEEndpoint*>::iterator i = m_authList.find(conn);
     assert(i != m_authList.end() && "DaemonICETransport::Authenticated(): Conn not on m_authList");
 
     /*
@@ -601,7 +580,7 @@ void DaemonICETransport::Authenticated(DaemonICEEndpoint* conn)
      * and the endpoint can be on the endpointList and not the authList.
      */
     m_authList.erase(i);
-    m_endpointList.push_back(conn);
+    m_endpointList.insert(conn);
 
     m_endpointListLock.Unlock(MUTEX_CONTEXT);
 
@@ -690,8 +669,7 @@ QStatus DaemonICETransport::Start()
 
     /*
      * Start up an instance of the lightweight Discovery Manager and tell it what
-     * GUID we think we are and the credentials to use for the TCP connection with the
-     * Rendezvous Server.
+     * GUID we think we are.
      */
 
     m_dm = new DiscoveryManager(m_bus);
@@ -716,14 +694,8 @@ QStatus DaemonICETransport::Start()
      * we hear about a new well-known bus name.
      */
     m_dm->SetCallback(
-        new CallbackImpl<ICECallback, void, ajn::DiscoveryManager::CallbackType, const String&, const String&, const vector<String>*, uint8_t>
+        new CallbackImpl<ICECallback, void, ajn::DiscoveryManager::CallbackType, const String&, const vector<String>*, uint8_t>
             (&m_iceCallback, &ICECallback::ICE));
-
-    /* Get the interface name prefixes from the Discovery Manager */
-    m_dm->GetInterfaceNamePrefixes(ethernetInterfaceName, wifiInterfaceName, mobileNwInterfaceName);
-
-    /* Set the interface name prefixes in the ICEManager*/
-    m_iceManager->SetInterfaceNamePrefixes(ethernetInterfaceName, wifiInterfaceName, mobileNwInterfaceName);
 
     /*
      * Start the DaemonICETransport Run loop through the thread base class
@@ -757,7 +729,6 @@ QStatus DaemonICETransport::Stop(void)
     QStatus status = Thread::Stop();
     if (status != ER_OK) {
         QCC_LogError(status, ("DaemonICETransport::Stop(): Failed to Stop() DaemonICETransport Run thread"));
-        return status;
     }
 
     m_endpointListLock.Lock(MUTEX_CONTEXT);
@@ -769,7 +740,7 @@ QStatus DaemonICETransport::Stop(void)
      * data structure.  We call Stop() to stop that thread from running.  The
      * endpoint Rx and Tx threads will not be running yet.
      */
-    for (list<DaemonICEEndpoint*>::iterator i = m_authList.begin(); i != m_authList.end(); ++i) {
+    for (set<DaemonICEEndpoint*>::iterator i = m_authList.begin(); i != m_authList.end(); ++i) {
         (*i)->AuthStop();
     }
 
@@ -781,7 +752,7 @@ QStatus DaemonICETransport::Stop(void)
      * the connnection is on the m_endpointList, we know that the authentication
      * thread has handed off responsibility.
      */
-    for (list<DaemonICEEndpoint*>::iterator i = m_endpointList.begin(); i != m_endpointList.end(); ++i) {
+    for (set<DaemonICEEndpoint*>::iterator i = m_endpointList.begin(); i != m_endpointList.end(); ++i) {
         (*i)->Stop();
     }
 
@@ -803,6 +774,9 @@ QStatus DaemonICETransport::Stop(void)
     if (m_dm) {
         m_dm->Stop();
     }
+
+    /* Stop the timer */
+    daemonICETransportTimer.Stop();
 
     return ER_OK;
 }
@@ -845,11 +819,16 @@ QStatus DaemonICETransport::Join(void)
      * authentication threads in a previously required Stop().  We need to
      * Join() all of these auth threads here.
      */
-    for (list<DaemonICEEndpoint*>::iterator i = m_authList.begin(); i != m_authList.end(); ++i) {
-        (*i)->AuthJoin();
-        delete *i;
+    set<DaemonICEEndpoint*>::iterator it = m_authList.begin();
+    while (it != m_authList.end()) {
+        DaemonICEEndpoint* ep = *it;
+        m_authList.erase(it);
+        m_endpointListLock.Unlock(MUTEX_CONTEXT);
+        ep->AuthJoin();
+        delete ep;
+        m_endpointListLock.Lock(MUTEX_CONTEXT);
+        it = m_authList.upper_bound(ep);
     }
-    m_authList.clear();
 
     /*
      * Any running endpoints have been asked it their threads in a previously
@@ -857,13 +836,21 @@ QStatus DaemonICETransport::Join(void)
      * Join() will wait on the endpoint rx and tx threads to exit as opposed to
      * the joining of the auth thread we did above.
      */
-    for (list<DaemonICEEndpoint*>::iterator i = m_endpointList.begin(); i != m_endpointList.end(); ++i) {
-        (*i)->Join();
-        delete *i;
+    it = m_endpointList.begin();
+    while (it != m_endpointList.end()) {
+        DaemonICEEndpoint* ep = *it;
+        m_endpointList.erase(it);
+        m_endpointListLock.Unlock(MUTEX_CONTEXT);
+        ep->Join();
+        delete ep;
+        m_endpointListLock.Lock(MUTEX_CONTEXT);
+        it = m_endpointList.upper_bound(ep);
     }
-    m_endpointList.clear();
 
     m_endpointListLock.Unlock(MUTEX_CONTEXT);
+
+    /* Join the timer */
+    daemonICETransportTimer.Join();
 
     m_stopping = false;
 
@@ -912,7 +899,6 @@ void DaemonICETransport::PacketEngineConnectCB(PacketEngine& engine,
 
     ep->m_packetEngineReturnStatus = status;
     ep->m_connectWaitEvent->SetEvent();
-    ep->DecrementRef();
 }
 
 bool DaemonICETransport::PacketEngineAcceptCB(PacketEngine& engine, const PacketEngineStream& stream, const PacketDest& dest)
@@ -941,13 +927,21 @@ bool DaemonICETransport::PacketEngineAcceptCB(PacketEngine& engine, const Packet
          * pitch the connection.
          */
         m_endpointListLock.Lock(MUTEX_CONTEXT);
-        m_authList.push_front(conn);
+        m_authList.insert(conn);
+        m_endpointListLock.Unlock(MUTEX_CONTEXT);
+
         status = conn->Authenticate();
         if (status != ER_OK) {
-            m_authList.pop_front();
-            delete conn;
+            m_endpointListLock.Lock(MUTEX_CONTEXT);
+            set<DaemonICEEndpoint*>::iterator eit = m_authList.find(conn);
+            if (eit != m_authList.end()) {
+                m_authList.erase(eit);
+                m_endpointListLock.Unlock(MUTEX_CONTEXT);
+                delete conn;
+            } else {
+                m_endpointListLock.Unlock(MUTEX_CONTEXT);
+            }
         }
-        m_endpointListLock.Unlock(MUTEX_CONTEXT);
     }
 
     bool ret = (status == ER_OK);
@@ -964,7 +958,7 @@ void DaemonICETransport::PacketEngineDisconnectCB(PacketEngine& engine, const Pa
     /* Find endpoint that uses stream and stop it */
     m_endpointListLock.Lock(MUTEX_CONTEXT);
     bool foundEp = false;
-    list<DaemonICEEndpoint*>::iterator it = m_endpointList.begin();
+    set<DaemonICEEndpoint*>::iterator it = m_endpointList.begin();
     while (it != m_endpointList.end()) {
         if ((*it)->m_stream == stream) {
             (*it)->Stop();
@@ -979,9 +973,7 @@ void DaemonICETransport::PacketEngineDisconnectCB(PacketEngine& engine, const Pa
         it = m_authList.begin();
         while (it != m_authList.end()) {
             if ((*it)->m_stream == stream) {
-                delete *it;
-                m_authList.erase(it);
-                break;
+                (*it)->Stop();
             }
             ++it;
         }
@@ -991,70 +983,31 @@ void DaemonICETransport::PacketEngineDisconnectCB(PacketEngine& engine, const Pa
 
 void DaemonICETransport::SendSTUNKeepAliveAndTURNRefreshRequest(ICEPacketStream& icePktStream)
 {
-    QCC_DbgTrace(("%s(icePktStream=%p)", __FUNCTION__, &icePktStream));
+    QCC_DbgTrace(("DaemonICETransport::SendSTUNKeepAliveAndTURNRefreshRequest(icePktStream=%p)", &icePktStream));
 
     QStatus status = ER_OK;
 
-    ScatterGatherList rMsgSG;
-    uint8_t* rBuf;
-    uint8_t* rPos;
-    size_t rBufSize;
-    size_t expectedSent = 0;
-
-    /* Send NAT keep-alive */
-    StunMessage msg(STUN_MSG_INDICATION_CLASS, STUN_MSG_BINDING_METHOD,
-                    reinterpret_cast<const uint8_t*>(icePktStream.GetHmacKey().c_str()), icePktStream.GetHmacKey().size());
-
-    PacketDest dest = icePktStream.GetICEDestination();
-
-    rBufSize = msg.RenderSize();
-    rBuf = new uint8_t[rBufSize];
-    rPos = rBuf;
-
-    expectedSent = msg.Size();
-
-    status = msg.RenderBinary(rPos, rBufSize, rMsgSG);
     if (status == ER_OK) {
-        status = icePktStream.PushPacketBytes((const void*)rBuf, expectedSent, dest, true);
+        status = icePktStream.SendNATKeepAlive();
     }
     if (status != ER_OK) {
         QCC_LogError(ER_FAIL, ("Failed to send NAT keep alive for icePktStream=%p", &icePktStream));
     }
-    delete[] rBuf;
 
     /* Send TURN refresh (if needed) at slower interval */
-    if (icePktStream.GetCandidateType() == _ICECandidate::Relayed_Candidate) {
-        if ((GetTimestamp64() - icePktStream.GetTurnRefreshTimestamp()) >= icePktStream.GetTurnRefreshPeriod()) {
+    if (icePktStream.IsLocalTurn()) {
+        uint64_t now = GetTimestamp64();
+
+        if ((now - icePktStream.GetTurnRefreshTimestamp()) >= icePktStream.GetTurnRefreshPeriod()) {
+
             /* Send TURN refresh */
-            String hmacKey = icePktStream.GetHmacKey();
-            StunMessage refreshMsg(STUN_MSG_REQUEST_CLASS, STUN_MSG_REFRESH_METHOD, reinterpret_cast<const uint8_t*>(hmacKey.c_str()), hmacKey.size());
-
-            refreshMsg.AddAttribute(new StunAttributeSoftware("AllJoyn " + String(GetVersion())));
-
-            refreshMsg.AddAttribute(new StunAttributeUsername(icePktStream.GetTurnUsername()));
-            refreshMsg.AddAttribute(new StunAttributeLifetime(ajn::TURN_PERMISSION_REFRESH_PERIOD_SECS));
-            refreshMsg.AddAttribute(new StunAttributeRequestedTransport(ajn::REQUESTED_TRANSPORT_TYPE_UDP));
-            refreshMsg.AddAttribute(new StunAttributeMessageIntegrity(refreshMsg));
-            refreshMsg.AddAttribute(new StunAttributeFingerprint(refreshMsg));
-
-            rBufSize = refreshMsg.RenderSize();
-            rBuf = new uint8_t[rBufSize];
-            rPos = rBuf;
-
-            expectedSent = refreshMsg.Size();
-
-            status = refreshMsg.RenderBinary(rPos, rBufSize, rMsgSG);
             if (status == ER_OK) {
-                status = icePktStream.PushPacketBytes((const void*)rBuf, expectedSent, dest, true);
+                status = icePktStream.SendTURNRefresh(now);
             }
 
-            if (status == ER_OK) {
-                icePktStream.SetTurnRefreshTimestamp(GetTimestamp64());
-            } else {
+            if (status != ER_OK) {
                 QCC_LogError(status, ("Failed to send TURN refresh for icePktStream=%p", &icePktStream));
             }
-
-            delete[] rBuf;
         }
     }
 
@@ -1123,8 +1076,7 @@ void DaemonICETransport::EndpointExit(RemoteEndpoint* ep)
 
 ThreadReturn STDCALL DaemonICETransport::AllocateICESessionThread::Run(void* arg)
 {
-    QCC_DbgHLPrintf(("DaemonICETransport::AllocateICESessionThread::Run(): serviceName(%s) "
-                     "clientName(%s) clientGUID(%s)", serviceName.c_str(), clientName.c_str(), clientGUID.c_str()));
+    QCC_DbgHLPrintf(("DaemonICETransport::AllocateICESessionThread::Run(): clientGUID(%s)", clientGUID.c_str()));
 
     QStatus status = ER_FAIL;
 
@@ -1135,7 +1087,7 @@ ThreadReturn STDCALL DaemonICETransport::AllocateICESessionThread::Run(void* arg
     assert(transportObj->m_dm);
 
     STUNServerInfo stunInfo;
-    String matchID;
+    ICEPacketStream* pktStream = NULL;
 
     DiscoveryManager::SessionEntry entry;
 
@@ -1144,7 +1096,7 @@ ThreadReturn STDCALL DaemonICETransport::AllocateICESessionThread::Run(void* arg
      * on the remote daemon that we are intending to connect to. The STUN server
      * information is required to allocate the ICE candidates.
      */
-    if (transportObj->m_dm->GetSTUNInfo(false, clientGUID, clientName, stunInfo, matchID) == ER_OK) {
+    if (transportObj->m_dm->GetSTUNInfo(false, clientGUID, stunInfo) == ER_OK) {
         QCC_DbgPrintf(("DaemonICETransport::AllocateICESessionThread::Run(): Retrieved the STUN server information from the Discovery Manager"));
     } else {
         status = ER_FAIL;
@@ -1155,7 +1107,7 @@ ThreadReturn STDCALL DaemonICETransport::AllocateICESessionThread::Run(void* arg
     /* Ensure that the TURN user and pwd tokens have not expired. If they have, then get new tokens from the
      * Rendezvous Server */
     if (!transportObj->CheckTURNTokenExpiry(stunInfo)) {
-        status = transportObj->GetNewTokensFromServer(false, stunInfo, matchID, clientGUID, clientName);
+        status = transportObj->GetNewTokensFromServer(false, stunInfo, clientGUID);
 
         if (status != ER_OK) {
             QCC_LogError(status, ("DaemonICETransport::AllocateICESessionThread::Run(): Unable to retrieve new "
@@ -1164,8 +1116,12 @@ ThreadReturn STDCALL DaemonICETransport::AllocateICESessionThread::Run(void* arg
         }
     }
 
+    IPAddress onDemandAddress, persistentAddress;
+    transportObj->m_dm->GetRendezvousConnIPAddresses(onDemandAddress, persistentAddress);
+
     /* Gather ICE candidates */
-    status = (transportObj->m_iceManager)->AllocateSession(true, true, &iceListener, iceSession, stunInfo);
+    status = transportObj->m_iceManager.AllocateSession(true, true, transportObj->m_dm->GetEnableIPv6(), &iceListener, iceSession, stunInfo,
+                                                        onDemandAddress, persistentAddress);
 
     if (status != ER_OK) {
         QCC_LogError(status, ("DaemonICETransport::AllocateICESessionThread::Run(): AllocateSession failed"));
@@ -1194,13 +1150,13 @@ ThreadReturn STDCALL DaemonICETransport::AllocateICESessionThread::Run(void* arg
 
             if (ER_OK == status) {
                 /* Send candidates to the server */
-                QCC_DbgPrintf(("DaemonICETransport::AllocateICESessionThread::Run(): Service %s sending candidates to Peer:", serviceName.c_str()));
+                QCC_DbgPrintf(("DaemonICETransport::AllocateICESessionThread::Run(): Service sending candidates to Peer"));
 
                 PeerCandidateListenerImpl peerCandidateListener;
-                entry.SetServiceInfo(clientGUID, clientName, candidates, ufrag, pwd, &peerCandidateListener);
+                entry.SetServiceInfo(candidates, ufrag, pwd, &peerCandidateListener);
 
                 /* Send the ICE Address Candidates to the client */
-                status = (transportObj->m_dm)->QueueICEAddressCandidatesMessage(false, std::pair<String, DiscoveryManager::SessionEntry>(serviceName, entry));
+                status = (transportObj->m_dm)->QueueICEAddressCandidatesMessage(false, std::pair<String, DiscoveryManager::SessionEntry>(clientGUID, entry));
 
                 if (status == ER_OK) {
                     /*
@@ -1221,102 +1177,107 @@ ThreadReturn STDCALL DaemonICETransport::AllocateICESessionThread::Run(void* arg
 
                             peerCandidateListener.GetPeerCandiates(peerCandidates, ice_frag, ice_pwd);
 
-                            QCC_DbgPrintf(("DaemonICETransport::AllocateICESessionThread::Run(): StartChecks(peer_frag=%s, peer_pwd=%s)", ice_frag.c_str(), ice_pwd.c_str()));
+                            /* Start the ICE checks only if both the local and the remote candidate list are not empty */
+                            if ((!candidates.empty()) && (!peerCandidates.empty())) {
+                                QCC_DbgPrintf(("DaemonICETransport::AllocateICESessionThread::Run(): StartChecks(peer_frag=%s, peer_pwd=%s)", ice_frag.c_str(), ice_pwd.c_str()));
 
-                            /*Start the ICE Checks*/
-                            status = iceSession->StartChecks(peerCandidates, ice_frag, ice_pwd);
+                                /*Start the ICE Checks*/
+                                status = iceSession->StartChecks(peerCandidates, ice_frag, ice_pwd);
 
-                            QCC_DbgPrintf(("DaemonICETransport::AllocateICESessionThread::Run(): StartChecks status(0x%x)\n", status));
+                                QCC_DbgPrintf(("DaemonICETransport::AllocateICESessionThread::Run(): StartChecks status(0x%x)\n", status));
 
-                            if (status == ER_OK) {
-                                /* Wait for ICE to change to final state */
+                                if (status == ER_OK) {
+                                    /* Wait for ICE to change to final state */
 
-                                QCC_DbgPrintf(("DaemonICETransport::AllocateICESessionThread::Run(): Wait for ICE Checks to complete\n"));
-                                /* Wait for the ICE Checks to complete */
-                                status = iceListener.Wait();
+                                    QCC_DbgPrintf(("DaemonICETransport::AllocateICESessionThread::Run(): Wait for ICE Checks to complete\n"));
+                                    /* Wait for the ICE Checks to complete */
+                                    status = iceListener.Wait();
 
-                                if (ER_OK == status) {
-                                    QCC_DbgPrintf(("DaemonICETransport::AllocateICESessionThread::Run(): ICE Checks complete\n"));
+                                    if (ER_OK == status) {
+                                        QCC_DbgPrintf(("DaemonICETransport::AllocateICESessionThread::Run(): ICE Checks complete\n"));
 
-                                    ICESession::ICESessionState state = iceListener.GetState();
+                                        ICESession::ICESessionState state = iceListener.GetState();
 
-                                    QCC_DbgPrintf(("DaemonICETransport::AllocateICESessionThread::Run(): iceListener.GetState(0x%x)\n", state));
+                                        QCC_DbgPrintf(("DaemonICETransport::AllocateICESessionThread::Run(): iceListener.GetState(0x%x)\n", state));
 
-                                    if (ICESession::ICEChecksSucceeded == state) {
-                                        QCC_DbgPrintf(("DaemonICETransport::AllocateICESessionThread::Run(): ICE Checks Succeeded\n"));
+                                        if (ICESession::ICEChecksSucceeded == state) {
+                                            QCC_DbgPrintf(("DaemonICETransport::AllocateICESessionThread::Run(): ICE Checks Succeeded\n"));
 
-                                        /*Make note of the selected candidate pair*/
-                                        vector<ICECandidatePair*> selectedCandidatePairList;
-                                        iceSession->GetSelectedCandidatePairList(selectedCandidatePairList);
+                                            /*Make note of the selected candidate pair*/
+                                            vector<ICECandidatePair*> selectedCandidatePairList;
+                                            iceSession->GetSelectedCandidatePairList(selectedCandidatePairList);
 
-                                        if (selectedCandidatePairList.size() > 0) {
+                                            if (selectedCandidatePairList.size() > 0) {
 
-                                            StunActivity* stunActivityPtr = selectedCandidatePairList[0]->local->GetStunActivity();
-                                            String remoteAddr = (stunActivityPtr->stun->GetRemoteAddr()).ToString();
-                                            String remotePort = U32ToString((uint32_t)(stunActivityPtr->stun->GetRemotePort()));
-                                            String connectSpec = "ice:guid=" + clientGUID;
+                                                StunActivity* stunActivityPtr = selectedCandidatePairList[0]->local->GetStunActivity();
+                                                String remoteAddr = (stunActivityPtr->stun->GetRemoteAddr()).ToString();
+                                                String remotePort = U32ToString((uint32_t)(stunActivityPtr->stun->GetRemotePort()));
+                                                String connectSpec = "ice:guid=" + clientGUID;
 
-                                            /* Wait for a while to let ICE settle down */
-                                            // @@ JP THIS NEEDS WORK
-                                            qcc::Sleep(2000);
+                                                /* Wait for a while to let ICE settle down */
+                                                // @@ JP THIS NEEDS WORK
+                                                qcc::Sleep(2000);
 
-                                            /* Disable listener threads */
-                                            for (size_t i = 0; i < selectedCandidatePairList.size(); ++i) {
-                                                stunActivityPtr->candidate->StopCheckListener();
-                                            }
-
-                                            /* Make sure we still need this new ICE connection */
-                                            transportObj->pktStreamMapLock.Lock(MUTEX_CONTEXT);
-                                            ICEPacketStream* pktStream = transportObj->AcquireICEPacketStream(connectSpec);
-                                            if (pktStream) {
-                                                /* Reuse existing pkstream rather than having two for the same destination */
-                                                QCC_DbgPrintf(("DaemonTCPTransport::AllocateICESessionThread: Reusing existing pktStream for %s", connectSpec.c_str()));
-                                            } else {
-                                                /* Wrap ICE session FD in a new ICEPacketStream */
-                                                ICEPacketStream pks(*iceSession, *stunActivityPtr->stun, selectedCandidatePairList[0]->local->GetType());
-                                                map<String, pair<ICEPacketStream, int32_t> >::iterator sit =
-                                                    transportObj->pktStreamMap.insert(pair<String, pair<ICEPacketStream, int32_t> >(connectSpec, pair<ICEPacketStream, int32_t>(pks, 1))).first;
-
-                                                /* Start ICEPacketStream */
-                                                status = sit->second.first.Start();
-
-                                                /* Stop the STUN RxThread and claim its file descriptor as our own */
-                                                stunActivityPtr->stun->ReleaseFD();
-
-                                                /* Make the packetEngine listen on icePktStream */
-                                                if (status == ER_OK) {
-                                                    status = transportObj->m_packetEngine.AddPacketStream(sit->second.first, *transportObj);
+                                                /* Disable listener threads */
+                                                for (size_t i = 0; i < selectedCandidatePairList.size(); ++i) {
+                                                    stunActivityPtr->candidate->StopCheckListener();
                                                 }
 
-                                                /* Assign pktStream or cleanup */
-                                                if (status == ER_OK) {
+                                                /* Make sure we still need this new ICE connection */
+                                                transportObj->pktStreamMapLock.Lock(MUTEX_CONTEXT);
+                                                pktStream = transportObj->AcquireICEPacketStream(connectSpec);
+                                                if (pktStream) {
+                                                    /* Reuse existing pkstream rather than having two for the same destination */
+                                                    QCC_DbgPrintf(("DaemonICETransport::AllocateICESessionThread: Reusing existing pktStream for %s", connectSpec.c_str()));
+                                                } else {
+                                                    /* Wrap ICE session FD in a new ICEPacketStream */
+                                                    ICEPacketStream pks(*iceSession, *stunActivityPtr->stun, *selectedCandidatePairList[0]);
+                                                    map<String, pair<ICEPacketStream, int32_t> >::iterator sit =
+                                                        transportObj->pktStreamMap.insert(pair<String, pair<ICEPacketStream, int32_t> >(connectSpec, pair<ICEPacketStream, int32_t>(pks, 1))).first;
                                                     pktStream = &(sit->second.first);
 
-                                                    /* Arm the keep-alive/TURN refresh timer (immediate fire) */
-                                                    transportObj->daemonICETransportTimer.AddAlarm(Alarm(0, transportObj, 0, pktStream));
-                                                } else {
-                                                    QCC_LogError(status, ("ICEPacketStream.Start or AddPacketStream failed"));
-                                                    transportObj->pktStreamMap.erase(sit);
+                                                    /* Start ICEPacketStream */
+                                                    status = sit->second.first.Start();
+
+                                                    /* Stop the STUN RxThread and claim its file descriptor as our own */
+                                                    stunActivityPtr->stun->ReleaseFD();
+
+                                                    /* Make the packetEngine listen on icePktStream */
+                                                    if (status == ER_OK) {
+                                                        status = transportObj->m_packetEngine.AddPacketStream(sit->second.first, *transportObj);
+                                                    }
+
+                                                    if (status == ER_OK) {
+                                                        /* If we are using the local host candidate, we need not send NAT keepalives or TURN refreshes */
+                                                        if (!pktStream->IsLocalHost()) {
+                                                            /* Arm the keep-alive/TURN refresh timer (immediate fire) */
+                                                            transportObj->daemonICETransportTimer.AddAlarm(Alarm(0, transportObj, 0, pktStream));
+                                                        }
+                                                    } else {
+                                                        QCC_LogError(status, ("ICEPacketStream.Start or AddPacketStream failed"));
+                                                    }
                                                 }
+                                                transportObj->pktStreamMapLock.Unlock(MUTEX_CONTEXT);
+                                            } else {
+                                                status = ER_FAIL;
+                                                QCC_LogError(status, ("DaemonICETransport::AllocateICESessionThread::Run():No successful candidates gathered"));
                                             }
-                                            transportObj->pktStreamMapLock.Unlock(MUTEX_CONTEXT);
-                                        } else {
+                                        } else if (ICESession::ICEChecksRunning != state) {
                                             status = ER_FAIL;
-                                            QCC_LogError(status, ("DaemonICETransport::AllocateICESessionThread::Run():No successful candidates gathered"));
+                                            QCC_LogError(status, ("DaemonICETransport::AllocateICESessionThread::Run():ICE Listener reported non-successful completion (%d)", state));
                                         }
-                                    } else if (ICESession::ICEChecksRunning != state) {
-                                        status = ER_FAIL;
-                                        QCC_LogError(status, ("DaemonICETransport::AllocateICESessionThread::Run():ICE Listener reported non-successful completion (%d)", state));
+                                    } else {
+                                        if (status == ER_TIMEOUT) {
+                                            QCC_LogError(status, ("DaemonICETransport::AllocateICESessionThread::Run(): Timed out waiting for StartChecks to complete"));
+                                        } else {
+                                            QCC_LogError(status, ("DaemonICETransport::AllocateICESessionThread::Run(): Wait for StartChecks failed"));
+                                        }
                                     }
                                 } else {
-                                    if (status == ER_TIMEOUT) {
-                                        QCC_LogError(status, ("DaemonICETransport::AllocateICESessionThread::Run(): Timed out waiting for StartChecks to complete"));
-                                    } else {
-                                        QCC_LogError(status, ("DaemonICETransport::AllocateICESessionThread::Run(): Wait for StartChecks failed"));
-                                    }
+                                    QCC_LogError(status, ("DaemonICETransport::AllocateICESessionThread::Run(): Unable to start the ICE Checks"));
                                 }
                             } else {
-                                QCC_LogError(status, ("DaemonICETransport::AllocateICESessionThread::Run(): Unable to start the ICE Checks"));
+                                QCC_LogError(status, ("DaemonICETransport::AllocateICESessionThread::Run(): Not starting the ICE checks: candidates.empty()=%d peerCandidates.empty()=%d", candidates.empty(), peerCandidates.empty()));
                             }
                         } else {
                             QCC_LogError(status, ("DaemonICETransport::AllocateICESessionThread::Run(): Timed out waiting for the delivery of the Address Candidates to the peer"));
@@ -1331,11 +1292,16 @@ ThreadReturn STDCALL DaemonICETransport::AllocateICESessionThread::Run(void* arg
         }
     }
 
+    /* Remove new packet stream if we failed */
+    if ((status != ER_OK) && pktStream) {
+        transportObj->ReleaseICEPacketStream(*pktStream);
+    }
+
     /* Succeed or fail, this iceSession is done */
     if (iceSession) {
-        transportObj->m_iceManager->DeallocateSession(iceSession);
+        transportObj->m_iceManager.DeallocateSession(iceSession);
         iceSession = NULL;
-        (transportObj->m_dm)->RemoveSessionDetailFromMap(false, std::pair<String, DiscoveryManager::SessionEntry>(serviceName, entry));
+        (transportObj->m_dm)->RemoveSessionDetailFromMap(false, std::pair<String, DiscoveryManager::SessionEntry>(clientGUID, entry));
     }
 
     return 0;
@@ -1372,7 +1338,7 @@ void DaemonICETransport::ManageEndpoints(Timespec tTimeout)
      * any that are no longer running or are taking too long to authenticate
      * (we assume a denial of service attack in this case).
      */
-    list<DaemonICEEndpoint*>::iterator i = m_authList.begin();
+    set<DaemonICEEndpoint*>::iterator i = m_authList.begin();
     while (i != m_authList.end()) {
         DaemonICEEndpoint* ep = *i;
         DaemonICEEndpoint::AuthState authState = ep->GetAuthState();
@@ -1385,11 +1351,12 @@ void DaemonICETransport::ManageEndpoints(Timespec tTimeout)
              * as we Join() the (failed) authentication thread.
              */
             QCC_DbgHLPrintf(("DaemonICETransport::ManageEndpoints(): Scavenging failed authenticator"));
+            m_authList.erase(i);
+            m_endpointListLock.Unlock(MUTEX_CONTEXT);
             ep->AuthJoin();
-            // @@ JP No longer required since ice sessions are now killed off during endpoint init
-            //m_iceManager->DeallocateSession(ep->m_iceSession);
-            i = m_authList.erase(i);
             delete ep;
+            m_endpointListLock.Lock(MUTEX_CONTEXT);
+            i = m_authList.upper_bound(ep);
             continue;
         }
 
@@ -1447,8 +1414,11 @@ void DaemonICETransport::ManageEndpoints(Timespec tTimeout)
              * the state.
              */
             QCC_DbgHLPrintf(("DaemonICETransport::ManageEndpoints(): Scavenging failed authenticator"));
+            m_endpointListLock.Unlock(MUTEX_CONTEXT);
             ep->AuthJoin();
             ep->SetAuthDone();
+            m_endpointListLock.Lock(MUTEX_CONTEXT);
+            i = m_endpointList.upper_bound(ep);
             continue;
         }
 
@@ -1461,10 +1431,11 @@ void DaemonICETransport::ManageEndpoints(Timespec tTimeout)
          * joined.
          */
         if (endpointState == DaemonICEEndpoint::EP_FAILED) {
-            // @@ JP No longer required since ice sessions are now killed off during endpoint init
-            //m_iceManager->DeallocateSession(ep->m_iceSession);
-            i = m_endpointList.erase(i);
+            m_endpointList.erase(i);
+            m_endpointListLock.Unlock(MUTEX_CONTEXT);
             delete ep;
+            m_endpointListLock.Lock(MUTEX_CONTEXT);
+            i = m_endpointList.upper_bound(ep);
             continue;
         }
 
@@ -1481,11 +1452,12 @@ void DaemonICETransport::ManageEndpoints(Timespec tTimeout)
          * the endpoint AuthJoin() to join the auth thread.
          */
         if (endpointState == DaemonICEEndpoint::EP_STOPPING) {
+            m_endpointList.erase(i);
+            m_endpointListLock.Unlock(MUTEX_CONTEXT);
             ep->Join();
-            // @@ JP No longer required since ice sessions are now killed off during endpoint init
-            //m_iceManager->DeallocateSession(ep->m_iceSession);
-            i = m_endpointList.erase(i);
             delete ep;
+            m_endpointListLock.Lock(MUTEX_CONTEXT);
+            i = m_endpointList.upper_bound(ep);
             continue;
         }
         ++i;
@@ -1594,52 +1566,40 @@ void* DaemonICETransport::Run(void* arg)
             // the IncomingICESessions. Spin off a separate thread to handle this allocation of ICE Sessions.
             m_IncomingICESessionsLock.Lock(MUTEX_CONTEXT);
 
-            if (!IncomingICESessions.empty()) {
+            while (!IncomingICESessions.empty()) {
+                QCC_DbgPrintf(("DaemonICETransport::Run(): maxAuth == %d", maxAuth));
+                QCC_DbgPrintf(("DaemonICETransport::Run(): maxConn == %d", maxConn));
+                QCC_DbgPrintf(("DaemonICETransport::Run(): mAuthList.size() == %d", m_authList.size()));
+                QCC_DbgPrintf(("DaemonICETransport::Run(): mEndpointList.size() == %d", m_endpointList.size()));
+                assert(m_authList.size() + m_endpointList.size() <= maxConn);
 
-                std::multimap<String, SessionReceiverInfo>::iterator it;
+                /*
+                 * Do we have a slot available for a new connection?  If so, use
+                 * it.
+                 */
+                m_endpointListLock.Lock(MUTEX_CONTEXT);
+                if ((m_authList.size() < maxAuth) && (m_authList.size() + m_endpointList.size() < maxConn)) {
+                    /* Handle AllocateICESession on another thread */
+                    allocateICESessionThreadsLock.Lock(MUTEX_CONTEXT);
 
-                for (it = IncomingICESessions.begin(); it != IncomingICESessions.end();) {
+                    if (!m_stopping) {
+                        AllocateICESessionThread* ast = new AllocateICESessionThread(this, IncomingICESessions.front());
+                        status = ast->Start(NULL, ast);
+                        if (status == ER_OK) {
+                            allocateICESessionThreads.push_back(ast);
 
-                    QCC_DbgPrintf(("DaemonICETransport::Run(): maxAuth == %d", maxAuth));
-                    QCC_DbgPrintf(("DaemonICETransport::Run(): maxConn == %d", maxConn));
-                    QCC_DbgPrintf(("DaemonICETransport::Run(): mAuthList.size() == %d", m_authList.size()));
-                    QCC_DbgPrintf(("DaemonICETransport::Run(): mEndpointList.size() == %d", m_endpointList.size()));
-                    assert(m_authList.size() + m_endpointList.size() <= maxConn);
-
-                    /*
-                     * Do we have a slot available for a new connection?  If so, use
-                     * it.
-                     */
-                    m_endpointListLock.Lock(MUTEX_CONTEXT);
-                    if ((m_authList.size() < maxAuth) && (m_authList.size() + m_endpointList.size() < maxConn)) {
-                        /* Handle AllocateICESession on another thread */
-                        allocateICESessionThreadsLock.Lock(MUTEX_CONTEXT);
-
-                        if (!m_stopping) {
-                            AllocateICESessionThread* ast = new AllocateICESessionThread(this, it->first, (it->second).m_foundName, (it->second).m_guid);
-                            status = ast->Start(NULL, ast);
-                            if (status == ER_OK) {
-                                allocateICESessionThreads.push_back(ast);
-
-                                // Remove this entry from IncomingICESessions
-                                IncomingICESessions.erase(it++);
-
-                            } else {
-                                QCC_LogError(status, ("DaemonICETransport::Run(): Failed to start AllocateICESessionThread"));
-                                ++it;
-                            }
                         } else {
-                            ++it;
+                            QCC_LogError(status, ("DaemonICETransport::Run(): Failed to start AllocateICESessionThread"));
                         }
-                        allocateICESessionThreadsLock.Unlock(MUTEX_CONTEXT);
-                        m_endpointListLock.Unlock(MUTEX_CONTEXT);
-                    } else {
-                        m_endpointListLock.Unlock(MUTEX_CONTEXT);
-                        IncomingICESessions.clear();
-                        status = ER_AUTH_FAIL;
-                        QCC_LogError(status, ("DaemonICETransport::Run(): No slot for new connection"));
-                        ++it;
                     }
+                    IncomingICESessions.pop_front();
+                    allocateICESessionThreadsLock.Unlock(MUTEX_CONTEXT);
+                    m_endpointListLock.Unlock(MUTEX_CONTEXT);
+                } else {
+                    m_endpointListLock.Unlock(MUTEX_CONTEXT);
+                    IncomingICESessions.clear();
+                    status = ER_AUTH_FAIL;
+                    QCC_LogError(status, ("DaemonICETransport::Run(): No slot for new connection"));
                 }
             }
 
@@ -1698,32 +1658,6 @@ QStatus DaemonICETransport::NormalizeTransportSpec(const char* inSpec, String& o
         outSpec = "ice:guid=" + i->second;
     }
 
-    i = argMap.find("senderName");
-    if (i == argMap.end()) {
-        status = ER_BUS_BAD_TRANSPORT_ARGS;
-        QCC_LogError(status, ("DaemonICETransport::NormalizeTransportSpec: The unique name of the session initiator "
-                              "has not been specified in the ICE Transport Address"));
-    } else {
-        /*
-         * We have a value associated with the "senderName" key.  Run it through
-         * a conversion function to make sure it's a valid value.
-         */
-        outSpec += ",senderName=" + i->second;
-    }
-
-    i = argMap.find("foundName");
-    if (i == argMap.end()) {
-        status = ER_BUS_BAD_TRANSPORT_ARGS;
-        QCC_LogError(status, ("DaemonICETransport::NormalizeTransportSpec: The well known name that was found "
-                              "has not been specified in the ICE Transport Address"));
-    } else {
-        /*
-         * We have a value associated with the "foundName" key.  Run it through
-         * a conversion function to make sure it's a valid value.
-         */
-        outSpec += ",foundName=" + i->second;
-    }
-
     return ER_OK;
 }
 
@@ -1740,7 +1674,7 @@ QStatus DaemonICETransport::Connect(const char* connectSpec, const SessionOpts& 
      * We use the thread response from IsRunning to give us an idea of what our
      * Run thread is doing.  See the comment in Start() for details
      * about what IsRunning actually means, which might be subtly different from
-     * your intuitition.
+     * your intuition.
      *
      * If we see IsRunning(), the thread might actually have gotten a Stop(),
      * but has not yet exited its Run routine and become STOPPING.  To plug this
@@ -1759,8 +1693,9 @@ QStatus DaemonICETransport::Connect(const char* connectSpec, const SessionOpts& 
      * deleted after it is joined, we must have a valid name service or someone
      * isn't playing by the rules; so an assert is appropriate here.
      */
-    assert(m_iceManager);
     assert(m_dm);
+
+    DiscoveryManager::SessionEntry entry;
 
     /*
      * Parse and normalize the connectArgs.
@@ -1773,24 +1708,30 @@ QStatus DaemonICETransport::Connect(const char* connectSpec, const SessionOpts& 
         return status;
     }
 
+    pktStreamMapLock.Lock();
     ICEPacketStream* pktStream = AcquireICEPacketStream(normSpec);
     if (!pktStream) {
+        /*
+         * No pktStream exists. Put a dummy one on the pktStreamMap so other join attempts for the
+         * same destination (normSpec) will wait for this join's ICE dance to complete.
+         */
+        ICEPacketStream pks;
+        pktStreamMap.insert(pair<String, pair<ICEPacketStream, int32_t> >(normSpec, pair<ICEPacketStream, int32_t>(pks, 1))).first;
+        pktStreamMapLock.Unlock();
+
         /*
          * Figure out the ICE Address Candidates
          */
         ICESessionListenerImpl iceListener;
 
         STUNServerInfo stunInfo;
-        String matchID;
-
-        DiscoveryManager::SessionEntry entry;
 
         /*
          * Retrieve the STUN server information corresponding to the particular service name
          * on the remote daemon that we are intending to connect to. The STUN server
          * information is required to allocate the ICE candidates.
          */
-        if (m_dm->GetSTUNInfo(true, argMap["guid"], argMap["foundName"], stunInfo, matchID) == ER_OK) {
+        if (m_dm->GetSTUNInfo(true, argMap["guid"], stunInfo) == ER_OK) {
             QCC_DbgPrintf(("DaemonICETransport::Connect(): Retrieved the STUN server information from the Discovery Manager"));
         } else {
             status = ER_FAIL;
@@ -1801,15 +1742,19 @@ QStatus DaemonICETransport::Connect(const char* connectSpec, const SessionOpts& 
         /* Ensure that the TURN user and pwd tokens have not expired. If they have, then get new tokens from the
          * Rendezvous Server */
         if (!CheckTURNTokenExpiry(stunInfo)) {
-            status = GetNewTokensFromServer(true, stunInfo, matchID, argMap["guid"], argMap["foundName"]);
+            status = GetNewTokensFromServer(true, stunInfo, argMap["guid"]);
             if (status != ER_OK) {
                 QCC_LogError(status, ("DaemonICETransport::Connect(): Unable to retrieve new tokens from the Rendezvous Server"));
                 return status;
             }
         }
 
+        IPAddress onDemandAddress, persistentAddress;
+        m_dm->GetRendezvousConnIPAddresses(onDemandAddress, persistentAddress);
+
         /* Gather ICE candidates */
-        status = m_iceManager->AllocateSession(true, false, &iceListener, iceSession, stunInfo);
+        status = m_iceManager.AllocateSession(true, false, m_dm->GetEnableIPv6(), &iceListener, iceSession, stunInfo,
+                                              onDemandAddress, persistentAddress);
         if (status == ER_OK) {
             status = iceListener.Wait();
 
@@ -1829,12 +1774,12 @@ QStatus DaemonICETransport::Connect(const char* connectSpec, const SessionOpts& 
 
                 if (ER_OK == status) {
                     /* Send ICE candidates to server */
-                    QCC_DbgPrintf(("DaemonICETransport::Connect(): Client %s sending its candidates to Peer", argMap["senderName"].c_str()));
+                    QCC_DbgPrintf(("DaemonICETransport::Connect(): Client sending its candidates to Peer"));
 
                     PeerCandidateListenerImpl peerCandidateListener;
-                    entry.SetClientInfo(argMap["guid"], argMap["foundName"], candidates, ufrag, pwd, &peerCandidateListener);
+                    entry.SetClientInfo(candidates, ufrag, pwd, &peerCandidateListener);
 
-                    status = m_dm->QueueICEAddressCandidatesMessage(true, std::pair<String, DiscoveryManager::SessionEntry>(argMap["senderName"], entry));
+                    status = m_dm->QueueICEAddressCandidatesMessage(true, std::pair<String, DiscoveryManager::SessionEntry>(argMap["guid"], entry));
 
                     if (status == ER_OK) {
                         /*
@@ -1853,101 +1798,108 @@ QStatus DaemonICETransport::Connect(const char* connectSpec, const SessionOpts& 
                             /* Retrieve the Service's candidates */
                             peerCandidateListener.GetPeerCandiates(peerCandidates, ice_frag, ice_pwd);
 
-                            QCC_DbgPrintf(("DaemonICETransport::Connect(): Starting ICE Checks"));
+                            if ((!candidates.empty()) && (!peerCandidates.empty())) {
+                                QCC_DbgPrintf(("DaemonICETransport::Connect(): Starting ICE Checks"));
 
-                            /* Start the ICE Checks*/
-                            status = iceSession->StartChecks(peerCandidates, true, ice_frag, ice_pwd);
+                                /* Start the ICE Checks*/
+                                status = iceSession->StartChecks(peerCandidates, false, ice_frag, ice_pwd);
 
-                            QCC_DbgPrintf(("DaemonICETransport::Connect(): StartChecks status = 0x%x", status));
+                                QCC_DbgPrintf(("DaemonICETransport::Connect(): StartChecks status = 0x%x", status));
 
-                            if (status == ER_OK) {
-                                /* Wait for ICE to change to final state */
-                                QCC_DbgPrintf(("DaemonICETransport::Connect(): Waiting for StartChecks to complete"));
-                                status = iceListener.Wait();
-                                QCC_DbgPrintf(("DaemonICETransport::Connect(): StartChecks done status=0x%x", status));
+                                if (status == ER_OK) {
+                                    /* Wait for ICE to change to final state */
+                                    QCC_DbgPrintf(("DaemonICETransport::Connect(): Waiting for StartChecks to complete"));
+                                    status = iceListener.Wait();
+                                    QCC_DbgPrintf(("DaemonICETransport::Connect(): StartChecks done status=0x%x", status));
 
-                                if (ER_OK == status) {
-                                    ICESession::ICESessionState state = iceListener.GetState();
+                                    if (ER_OK == status) {
+                                        ICESession::ICESessionState state = iceListener.GetState();
 
-                                    QCC_DbgPrintf(("DaemonICETransport::Connect(): state=0x%x", state));
+                                        QCC_DbgPrintf(("DaemonICETransport::Connect(): state=0x%x", state));
 
-                                    if (ICESession::ICEChecksSucceeded == state) {
+                                        if (ICESession::ICEChecksSucceeded == state) {
 
-                                        QCC_DbgPrintf(("DaemonICETransport::Connect(): ICE Checks Succeeded"));
+                                            QCC_DbgPrintf(("DaemonICETransport::Connect(): ICE Checks Succeeded"));
 
-                                        /*Make note of the selected candidate pair*/
-                                        vector<ICECandidatePair*> selectedCandidatePairList;
-                                        iceSession->GetSelectedCandidatePairList(selectedCandidatePairList);
+                                            /*Make note of the selected candidate pair*/
+                                            vector<ICECandidatePair*> selectedCandidatePairList;
+                                            iceSession->GetSelectedCandidatePairList(selectedCandidatePairList);
 
-                                        if (selectedCandidatePairList.size() > 0) {
+                                            if (selectedCandidatePairList.size() > 0) {
 
-                                            /* Wait for a while to let ICE settle down */
-                                            // @@ JP THIS NEEDS WORK
-                                            qcc::Sleep(2000);
+                                                /* Wait for a while to let ICE settle down */
+                                                // @@ JP THIS NEEDS WORK
+                                                qcc::Sleep(2000);
 
-                                            /* Disable listener threads */
-                                            for (size_t i = 0; i < selectedCandidatePairList.size(); ++i) {
-                                                selectedCandidatePairList[i]->local->GetStunActivity()->candidate->StopCheckListener();
-                                            }
-
-                                            /*
-                                             * Make sure that pktStream wasnt created by somebody else while ICE was going on. If so,
-                                             * reuse the existing packet stream
-                                             */
-                                            pktStreamMapLock.Lock(MUTEX_CONTEXT);
-                                            pktStream = AcquireICEPacketStream(normSpec);
-                                            if (!pktStream) {
-                                                /* Stop the STUN RxThread and claim its file descriptor as our own */
-                                                Stun* stun = selectedCandidatePairList[0]->local->GetStunActivity()->stun;
-
-                                                /* Wrap ICE session FD in a new ICEPacketStream */
-                                                ICEPacketStream pks(*iceSession, *stun, selectedCandidatePairList[0]->local->GetType());
-                                                map<String, pair<ICEPacketStream, int32_t> >::iterator it =
-                                                    pktStreamMap.insert(pair<String, pair<ICEPacketStream, int32_t> >(normSpec, pair<ICEPacketStream, int32_t>(pks, 1))).first;
-
-                                                /* Start ICEPacketStream */
-                                                status = it->second.first.Start();
-
-                                                /* Make Stun give up ownership of its fd */
-                                                stun->ReleaseFD();
-
-                                                /* Make the packetEngine listen on icePktStream */
-                                                if (status == ER_OK) {
-                                                    status = m_packetEngine.AddPacketStream(it->second.first, *this);
+                                                /* Disable listener threads */
+                                                for (size_t i = 0; i < selectedCandidatePairList.size(); ++i) {
+                                                    selectedCandidatePairList[i]->local->GetStunActivity()->candidate->StopCheckListener();
                                                 }
 
-                                                /* Assign pktStream or cleanup */
-                                                if (status == ER_OK) {
-                                                    pktStream = &(it->second.first);
+                                                /*
+                                                 * Make sure that pktStream wasnt created by somebody else while ICE was going on. If so,
+                                                 * reuse the existing packet stream
+                                                 */
+                                                pktStreamMapLock.Lock(MUTEX_CONTEXT);
+                                                pktStream = AcquireICEPacketStream(normSpec);
+                                                if (!pktStream || !pktStream->HasSocket()) {
+                                                    /* Stop the STUN RxThread and claim its file descriptor as our own */
+                                                    Stun* stun = selectedCandidatePairList[0]->local->GetStunActivity()->stun;
 
-                                                    /* Arm the keep-alive/TURN refresh timer (immediate fire) */
-                                                    daemonICETransportTimer.AddAlarm(Alarm(0, this, 0, pktStream));
-                                                } else {
-                                                    QCC_LogError(status, ("ICEPacketStream.Start or AddPacketStream failed"));
-                                                    pktStreamMap.erase(it);
+                                                    /* Wrap ICE session FD in a new ICEPacketStream (and reset ref count) */
+                                                    pktStreamMap[normSpec] = pair<ICEPacketStream, int32_t>(ICEPacketStream(*iceSession, *stun, *selectedCandidatePairList[0]), 1);
+                                                    pktStream = &pktStreamMap[normSpec].first;
+
+                                                    /* Start ICEPacketStream */
+                                                    status = pktStream->Start();
+
+                                                    /* Make Stun give up ownership of its fd */
+                                                    stun->ReleaseFD();
+
+                                                    /* Deallocate the iceSession. This must be done BEFORE the packetEngine starts using stun's fd */
+                                                    m_iceManager.DeallocateSession(iceSession);
+                                                    iceSession = NULL;
+                                                    m_dm->RemoveSessionDetailFromMap(true, std::pair<String, DiscoveryManager::SessionEntry>(argMap["guid"], entry));
+
+                                                    /* Make the packetEngine listen on icePktStream */
+                                                    if (status == ER_OK) {
+                                                        status = m_packetEngine.AddPacketStream(*pktStream, *this);
+                                                    }
+
+                                                    if (status == ER_OK) {
+                                                        /* If we are using the local host candidate, we need not send NAT keepalives or TURN refreshes */
+                                                        if (!pktStream->IsLocalHost()) {
+                                                            /* Arm the keep-alive (immediate fire) */
+                                                            daemonICETransportTimer.AddAlarm(Alarm(0, this, 0, pktStream));
+                                                        }
+                                                    } else {
+                                                        QCC_LogError(status, ("ICEPacketStream.Start or AddPacketStream failed"));
+                                                    }
                                                 }
+                                                pktStreamMapLock.Unlock();
+                                            } else {
+                                                status = ER_FAIL;
+                                                QCC_LogError(status, ("DaemonICETransport::Connect():No successful candidates gathered"));
                                             }
-                                            pktStreamMapLock.Unlock();
+                                        } else if (ICESession::ICEChecksRunning != state) {
+                                            status = ER_FAIL;
+                                            QCC_LogError(status, ("DaemonICETransport::Connect():ICE Listener reported non-successful completion (%d)", state));
                                         } else {
                                             status = ER_FAIL;
-                                            QCC_LogError(status, ("DaemonICETransport::Connect():No successful candidates gathered"));
+                                            QCC_LogError(status, ("DaemonICETransport::Connect(): Unexpected ICE state (%d)", state));
                                         }
-                                    } else if (ICESession::ICEChecksRunning != state) {
-                                        status = ER_FAIL;
-                                        QCC_LogError(status, ("DaemonICETransport::Connect():ICE Listener reported non-successful completion (%d)", state));
                                     } else {
-                                        status = ER_FAIL;
-                                        QCC_LogError(status, ("DaemonICETransport::Connect(): Unexpected ICE state (%d)", state));
+                                        if (status == ER_TIMEOUT) {
+                                            QCC_LogError(status, ("DaemonICETransport::Connect(): Timed out waiting for StartChecks to complete"));
+                                        } else {
+                                            QCC_LogError(status, ("DaemonICETransport::Connect(): Error waiting for StartChecks to complete"));
+                                        }
                                     }
                                 } else {
-                                    if (status == ER_TIMEOUT) {
-                                        QCC_LogError(status, ("DaemonICETransport::Connect(): Timed out waiting for StartChecks to complete"));
-                                    } else {
-                                        QCC_LogError(status, ("DaemonICETransport::Connect(): Error waiting for StartChecks to complete"));
-                                    }
+                                    QCC_LogError(status, ("DaemonICETransport::Connect(): Unable to start the ICE Checks"));
                                 }
                             } else {
-                                QCC_LogError(status, ("DaemonICETransport::Connect(): Unable to start the ICE Checks"));
+                                QCC_LogError(status, ("DaemonICETransport::Connect(): Not starting the ICE checks: candidates.empty()=%d peerCandidates.empty()=%d", candidates.empty(), peerCandidates.empty()));
                             }
                         } else if (status == ER_TIMEOUT) {
                             QCC_DbgPrintf(("DaemonICETransport::Connect(): Wait timed out\n"));
@@ -1969,6 +1921,17 @@ QStatus DaemonICETransport::Connect(const char* connectSpec, const SessionOpts& 
         } else {
             QCC_LogError(status, ("DaemonICETransport::Connect(): AllocateSession failed"));
         }
+    } else {
+        /*
+         * Attempt to reuse existing pktStream.
+         * pktStream may still be initializing from a different session's ICE dance.
+         * Wait for a fully functional pktStream or until it disappears.
+         */
+        pktStreamMapLock.Unlock();
+        while (pktStream && !pktStream->HasSocket()) {
+            qcc::Sleep(5);
+            pktStream = AcquireICEPacketStream(normSpec);
+        }
     }
 
     /* If we created or reused an ICEPacketStream, the wrap it in a DamonICEEndpoint */
@@ -1976,8 +1939,6 @@ QStatus DaemonICETransport::Connect(const char* connectSpec, const SessionOpts& 
     if (pktStream) {
         conn = new DaemonICEEndpoint(this, m_bus, false, normSpec, *pktStream);
         /* Setup the PacketEngine connection */
-        /* Increment endpoint ref count so it will stay alive until PacketEngineConnectCB is called */
-        conn->IncrementRef();
         status = conn->PacketEngineConnect(pktStream->GetICERemoteAddr(), pktStream->GetICERemotePort());
         if (status == ER_OK) {
             /*
@@ -1991,7 +1952,7 @@ QStatus DaemonICETransport::Connect(const char* connectSpec, const SessionOpts& 
             conn->SetActive();
             conn->SetAuthenticating();
             m_endpointListLock.Lock(MUTEX_CONTEXT);
-            m_endpointList.push_back(conn);
+            m_endpointList.insert(conn);
             m_endpointListLock.Unlock(MUTEX_CONTEXT);
 
             /* Initialized the features for this endpoint */
@@ -2028,21 +1989,25 @@ QStatus DaemonICETransport::Connect(const char* connectSpec, const SessionOpts& 
             QCC_LogError(status, ("DaemonICETransport::Connect(): Start DaemonICEEndpoint failed"));
 
             m_endpointListLock.Lock(MUTEX_CONTEXT);
-            list<DaemonICEEndpoint*>::iterator i = find(m_endpointList.begin(), m_endpointList.end(), conn);
+            set<DaemonICEEndpoint*>::iterator i = m_endpointList.find(conn);
             if (i != m_endpointList.end()) {
                 m_endpointList.erase(i);
             }
             m_endpointListLock.Unlock(MUTEX_CONTEXT);
             delete conn;
-            conn = NULL;
         }
     }
 
+    /* Clean up iceSession if it hasnt been already */
     if (iceSession) {
-        m_iceManager->DeallocateSession(iceSession);
+        m_iceManager.DeallocateSession(iceSession);
         iceSession = NULL;
-        // @@ JP Is this really necessary now that iceSessions are short-lived?
-        //m_dm->RemoveSessionDetailFromMap(true, std::pair<String, DiscoveryManager::SessionEntry>(argMap["senderName"], entry));
+        m_dm->RemoveSessionDetailFromMap(true, std::pair<String, DiscoveryManager::SessionEntry>(argMap["guid"], entry));
+    }
+
+    /* Remove new packet stream if we failed */
+    if ((status != ER_OK) && pktStream) {
+        ReleaseICEPacketStream(*pktStream);
     }
 
     /* Set caller's ep ref */
@@ -2059,16 +2024,70 @@ QStatus DaemonICETransport::Connect(const char* connectSpec, const SessionOpts& 
     return status;
 }
 
-QStatus DaemonICETransport::ComposeBusAddrForConnect(String& busAddr, String senderName, String foundName)
+QStatus DaemonICETransport::Disconnect(const char* connectSpec)
 {
-    QCC_DbgHLPrintf(("DaemonICETransport::ComposeBusAddrForConnect():busAddr(%s) senderName(%s) foundName(%s)",
-                     busAddr.c_str(), senderName.c_str(), foundName.c_str()));
+    QCC_DbgHLPrintf(("DaemonICETransport::Disconnect(): %s", connectSpec));
 
-    busAddr += ",senderName=" + senderName + ",foundName=" + foundName;
+    /*
+     * We only want to allow this call to proceed if we have a Run
+     * thread that isn't in the process of shutting down.  We use the
+     * thread response from IsRunning to give us an idea of what our
+     * (Run) thread is doing, and by extension the endpoint threads which
+     * must be running to properly clean up.  See the comment in Start() for
+     * details about what IsRunning actually means, which might be subtly
+     * different from your intuitition.
+     *
+     * If we see IsRunning(), the thread might actually have gotten a Stop(),
+     * but has not yet exited its Run routine and become STOPPING.  To plug this
+     * hole, we need to check IsRunning() and also m_stopping, which is set in
+     * our Stop() method.
+     */
+    if (IsRunning() == false || m_stopping == true) {
+        QCC_LogError(ER_BUS_TRANSPORT_NOT_STARTED, ("DaemonICETransport::Disconnect(): Not running or stopping; exiting"));
+        return ER_BUS_TRANSPORT_NOT_STARTED;
+    }
 
-    QCC_DbgPrintf(("DaemonICETransport::ComposeBusAddrForConnect(): Updated busAddr(%s)", busAddr.c_str()));
+    /*
+     * If we pass the IsRunning() gate above, we must have a Run
+     * thread spinning up or shutting down but not yet joined.  Since the discovery
+     * manager is created before the Run thread is spun up, and
+     * deleted after it is joined, we must have a valid discovery manager or someone
+     * isn't playing by the rules; so an assert is appropriate here.
+     */
+    assert(m_dm);
 
-    return ER_OK;
+    /*
+     * Higher level code tells us which connection is refers to by giving us the
+     * same connect spec it used in the Connect() call.
+     */
+    qcc::String normSpec;
+    map<qcc::String, qcc::String> argMap;
+    QStatus status = NormalizeTransportSpec(connectSpec, normSpec, argMap);
+    if (ER_OK != status) {
+        QCC_LogError(status, ("DaemonICETransport::Disconnect(): Invalid ICE connect spec \"%s\"", connectSpec));
+        return status;
+    }
+
+    /*
+     * Stop the remote endpoint.  Be careful here since calling Stop() on the
+     * DaemonICEEndpoint is going to cause the transmit and receive threads of the
+     * underlying RemoteEndpoint to exit, which will cause our EndpointExit()
+     * to be called, which will walk the list of endpoints and delete the one
+     * we are stopping.  Once we poke ep->Stop(), the pointer to ep must be
+     * considered dead.
+     */
+    status = ER_BUS_BAD_TRANSPORT_ARGS;
+    m_endpointListLock.Lock(MUTEX_CONTEXT);
+    for (set<DaemonICEEndpoint*>::iterator i = m_endpointList.begin(); i != m_endpointList.end(); ++i) {
+        if ((*i)->GetConnectSpec() == connectSpec) {
+            DaemonICEEndpoint* ep = *i;
+            ep->SetSuddenDisconnect(false);
+            m_endpointListLock.Unlock(MUTEX_CONTEXT);
+            return ep->Stop();
+        }
+    }
+    m_endpointListLock.Unlock(MUTEX_CONTEXT);
+    return status;
 }
 
 /*
@@ -2088,7 +2107,7 @@ QStatus DaemonICETransport::StartListen(const char* listenSpec)
      * thread response from IsRunning to give us an idea of what our server
      * accept (Run) thread is doing.  See the comment in Start() for details
      * about what IsRunning actually means, which might be subtly different from
-     * your intuitition.
+     * your intuition.
      *
      * If we see IsRunning(), the thread might actually have gotten a Stop(),
      * but has not yet exited its Run routine and become STOPPING.  To plug this
@@ -2201,7 +2220,7 @@ void DaemonICETransport::EnableDiscovery(const char* namePrefix)
         return;
     }
 
-    QStatus status = m_dm->AdvertiseOrLocate(false, namePrefix);
+    QStatus status = m_dm->SearchName(namePrefix);
 
     if (status != ER_OK) {
         QCC_LogError(status, ("DaemonICETransport::EnableDiscovery(): Failure enabling discovery for \"%s\" on ICE", namePrefix));
@@ -2229,7 +2248,7 @@ void DaemonICETransport::DisableDiscovery(const char* namePrefix)
     }
 
     assert(m_dm);
-    QStatus status = m_dm->CancelAdvertiseOrLocate(false, namePrefix);
+    QStatus status = m_dm->CancelSearchName(namePrefix);
 
     if (status != ER_OK) {
         QCC_LogError(status, ("DaemonICETransport::DisableDiscovery(): Failure disabling discovery for \"%s\" on ICE", namePrefix));
@@ -2257,7 +2276,7 @@ QStatus DaemonICETransport::EnableAdvertisement(const String& advertiseName)
     }
 
     assert(m_dm);
-    QStatus status = m_dm->AdvertiseOrLocate(true, advertiseName);
+    QStatus status = m_dm->AdvertiseName(advertiseName);
 
     if (status != ER_OK) {
         QCC_LogError(status, ("DaemonICETransport::EnableAdvertisment(%s) failure", advertiseName.c_str()));
@@ -2286,24 +2305,20 @@ void DaemonICETransport::DisableAdvertisement(const String& advertiseName, bool 
     }
 
     assert(m_dm);
-    QStatus status = m_dm->CancelAdvertiseOrLocate(true, advertiseName);
+    QStatus status = m_dm->CancelAdvertiseName(advertiseName);
 
     if (status != ER_OK) {
         QCC_LogError(status, ("DaemonICETransport::DisableAdvertisement(): Failure disabling advertising \"%s\" for ICE", advertiseName.c_str()));
     }
 }
 
-void DaemonICETransport::RecordIncomingICESessions(String serviceName, String guid, String clientName)
+void DaemonICETransport::RecordIncomingICESessions(String guid)
 {
-    SessionReceiverInfo entry;
-    entry.m_guid = guid;
-    entry.m_foundName = clientName;
-
     // We need not check if a similar entry already exists in IncomingICESessions before inserting the
     // details of this request in the same because it is absolutely valid to receive two independent connect
     // requests from the same client on the same daemon to this same service on this daemon.
     m_IncomingICESessionsLock.Lock(MUTEX_CONTEXT);
-    IncomingICESessions.insert(std::pair<String, SessionReceiverInfo>(serviceName, entry));
+    IncomingICESessions.push_back(guid);
     m_IncomingICESessionsLock.Unlock(MUTEX_CONTEXT);
 
     // Set the wakeDaemonICETransportRun event
@@ -2312,7 +2327,7 @@ void DaemonICETransport::RecordIncomingICESessions(String serviceName, String gu
 
 void DaemonICETransport::PurgeSessionsMap(String peerID, const vector<String>* nameList)
 {
-    std::multimap<String, SessionReceiverInfo>::iterator it;
+    std::list<String>::iterator it;
 
     //
     // If the nameList is empty delete all the entries corresponding to GUID=peerID
@@ -2326,7 +2341,7 @@ void DaemonICETransport::PurgeSessionsMap(String peerID, const vector<String>* n
         if (!IncomingICESessions.empty()) {
             for (it = IncomingICESessions.begin(); it != IncomingICESessions.end();) {
 
-                if ((it->second).m_guid == peerID) {
+                if (*it == peerID) {
                     IncomingICESessions.erase(it++);
                 } else {
                     ++it;
@@ -2337,8 +2352,7 @@ void DaemonICETransport::PurgeSessionsMap(String peerID, const vector<String>* n
     }
 }
 
-void DaemonICETransport::ICECallback::ICE(ajn::DiscoveryManager::CallbackType cbType, const String& name,
-                                          const String& guid, const vector<String>* nameList, uint8_t ttl)
+void DaemonICETransport::ICECallback::ICE(ajn::DiscoveryManager::CallbackType cbType, const String& guid, const vector<String>* nameList, uint8_t ttl)
 {
     /*
      * Whenever the Discovery Manager receives a message indicating that a bus-name
@@ -2377,7 +2391,7 @@ void DaemonICETransport::ICECallback::ICE(ajn::DiscoveryManager::CallbackType cb
                 m_daemonICETransport->PurgeSessionsMap(guid, nameList);
             }
         } else if (cbType == m_daemonICETransport->m_dm->ALLOCATE_ICE_SESSION) {
-            m_daemonICETransport->RecordIncomingICESessions(name, guid, nameList->front());
+            m_daemonICETransport->RecordIncomingICESessions(guid);
         }
     }
 }
@@ -2397,7 +2411,7 @@ bool DaemonICETransport::CheckTURNTokenExpiry(STUNServerInfo stunInfo)
     return true;
 }
 
-QStatus DaemonICETransport::GetNewTokensFromServer(bool client, STUNServerInfo& stunInfo, String matchID, String remotePeerAddress, String remoteName)
+QStatus DaemonICETransport::GetNewTokensFromServer(bool client, STUNServerInfo& stunInfo, String remotePeerAddress)
 {
     QCC_DbgPrintf(("DaemonICETransport::GetNewTokensFromServer()"));
 
@@ -2405,8 +2419,6 @@ QStatus DaemonICETransport::GetNewTokensFromServer(bool client, STUNServerInfo& 
     TokenRefreshMessage refreshMessage;
 
     refreshMessage.client = client;
-    refreshMessage.matchID = matchID;
-    refreshMessage.remoteName = remoteName;
     refreshMessage.remotePeerAddress = remotePeerAddress;
     refreshMessage.tokenRefreshListener = &tokenRefreshListener;
 
@@ -2439,7 +2451,7 @@ void DaemonICETransport::AlarmTriggered(const qcc::Alarm& alarm, QStatus alarmSt
         return;
     }
 
-    ICEPacketStream*ps = static_cast<ICEPacketStream*>(alarm.GetContext());
+    ICEPacketStream* ps = static_cast<ICEPacketStream*>(alarm.GetContext());
 
     /* Make sure PacketStream is still alive before calling nat/refresh code */
     QStatus status = AcquireICEPacketStreamByPointer(ps);
@@ -2498,6 +2510,7 @@ void DaemonICETransport::ReleaseICEPacketStream(const ICEPacketStream& icePktStr
             found = true;
             break;
         }
+        ++it;
     }
     pktStreamMapLock.Unlock(MUTEX_CONTEXT);
     if (!found) {

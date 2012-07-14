@@ -44,7 +44,10 @@
 #include "Transport.h"
 #include "TCPTransport.h"
 #include "DaemonTransport.h"
+//disable bluetooth on windows.
+#if !defined(QCC_OS_WINDOWS)
 #include "BTTransport.h"
+#endif
 
 #include "Bus.h"
 #include "BusController.h"
@@ -83,14 +86,16 @@ static const char defaultConfig[] =
     "    <property enable_ipv4=\"true\"/>"
     "    <property enable_ipv6=\"true\"/>"
     "  </ip_name_service>"
-    "  <alljoyn module=\"icedm\">"
+    "  <ice>"
+    "    <limit name=\"max_incomplete_connections\">16</limit>"
+    "    <limit name=\"max_completed_connections\">64</limit>"
+    "  </ice>"
+    "  <ice_discovery_manager>"
     "    <property interfaces=\"*\"/>"
-    "    <property server=\"rdvs-test.qualcomm.com\"/>"
-    "    <property EthernetPrefix=\"eth\"/>"
-    "    <property WiFiPrefix=\"wlan\"/>"
-    "    <property MobileNwPrefix=\"ppp\"/>"
-    "    <property Protocol=\"HTTPS\"/>"
-    "  </alljoyn>"
+    "    <property server=\"rdvs.alljoyn.org\"/>"
+    "    <property protocol=\"HTTP\"/>"
+    "    <property enable_ipv6=\"false\"/>"
+    "  </ice_discovery_manager>"
     "</busconfig>";
 
 static volatile sig_atomic_t g_interrupt = false;
@@ -295,10 +300,11 @@ int daemon(OptParse& opts)
     TransportFactoryContainer cntr;
     cntr.Add(new TransportFactory<DaemonTransport>(DaemonTransport::TransportName, false));
     cntr.Add(new TransportFactory<TCPTransport>(TCPTransport::TransportName, false));
+#if !defined(QCC_OS_WINDOWS)
     if (!opts.GetNoBT()) {
         cntr.Add(new TransportFactory<BTTransport>("bluetooth", false));
     }
-
+#endif
     Bus ajBus("alljoyn-daemon", cntr, listenSpecs.c_str());
     /*
      * Check we have at least one authentication mechanism registered.

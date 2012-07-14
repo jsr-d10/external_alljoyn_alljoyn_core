@@ -6,18 +6,30 @@ include $(CLEAR_VARS)
 
 LOCAL_CPP_EXTENSION := .cc
 
+LOCAL_SDK_VERSION := 8
+LOCAL_NDK_VERSION := 5
+LOCAL_NDK_STL_VARIANT := gnustl_static
+#LOCAL_ALLOW_UNDEFINED_SYMBOLS := true
+
+
 LOCAL_CFLAGS += \
 	-DQCC_CPU_ARM \
 	-DQCC_OS_ANDROID \
-	-DQCC_OS_GROUP_POSIX
+	-DQCC_OS_GROUP_POSIX \
+	-std=gnu++0x
+
+alljoyn_ndk_source_root := $(HISTORICAL_NDK_VERSIONS_ROOT)/android-ndk-r$(LOCAL_NDK_VERSION)/sources
+#alljoyn_ndk_source_root := $(HISTORICAL_NDK_VERSIONS_ROOT)/android-ndk-r5/sources
 
 LOCAL_C_INCLUDES := \
-	external/connectivity/stlport/stlport \
 	external/alljoyn/common/inc \
 	external/alljoyn/alljoyn_core/inc \
 	external/alljoyn/alljoyn_core/src \
 	external/alljoyn/alljoyn_core/autogen \
-	external/openssl/include \
+	external/openssl/include
+
+#	$(alljoyn_ndk_source_root)/cxx-stl/gnu-libstdc++/libs/$(TARGET_CPU_ABI)/include \
+#	$(alljoyn_ndk_source_root)/cxx-stl/gnu-libstdc++/include
 
 LOCAL_SRC_FILES := \
 	../common/src/ASN1.cc \
@@ -46,23 +58,21 @@ LOCAL_SRC_FILES := \
 	../common/src/Util.cc \
 	../common/src/XmlElement.cc \
 	../common/os/posix/AdapterUtil.cc \
-	../common/os/posix/atomic.cc \
 	../common/os/posix/Environ.cc \
 	../common/os/posix/Event.cc \
 	../common/os/posix/FileStream.cc \
 	../common/os/posix/IfConfigLinux.cc \
 	../common/os/posix/Mutex.cc \
-	../common/os/posix/osUtil.cc \
 	../common/os/posix/Socket.cc \
 	../common/os/posix/SslSocket.cc \
 	../common/os/posix/Thread.cc \
+	../common/os/posix/atomic.cc \
+	../common/os/posix/osUtil.cc \
 	../common/os/posix/time.cc \
 	../common/crypto/openssl/CryptoAES.cc \
 	../common/crypto/openssl/CryptoHash.cc \
-	../common/crypto/openssl/CryptoRand.cc \
-	../common/crypto/openssl/CryptoRSA.cc
-
-
+	../common/crypto/openssl/CryptoRSA.cc \
+	../common/crypto/openssl/CryptoRand.cc
 
 LOCAL_SRC_FILES += \
 	src/AllJoynCrypto.cc \
@@ -91,9 +101,6 @@ LOCAL_SRC_FILES += \
 	src/MsgArg.cc \
 	src/NullTransport.cc \
 	src/PeerState.cc \
-	src/ProtectedBusListener.cc \
-	src/ProtectedSessionListener.cc \
-	src/ProtectedSessionPortListener.cc \
 	src/ProxyBusObject.cc \
 	src/RemoteEndpoint.cc \
 	src/SASLEngine.cc \
@@ -121,8 +128,7 @@ LOCAL_PRELINK_MODULE := false
 
 LOCAL_REQUIRED_MODULES := \
 	external/openssl/crypto/libcrypto \
-	external/openssl/ssl/libssl \
-	external/connectivity/stlport
+	external/openssl/ssl/libssl
 
 LOCAL_MODULE_TAGS := optional
 LOCAL_MODULE := liballjoyn
@@ -135,10 +141,17 @@ include $(CLEAR_VARS)
 
 LOCAL_CPP_EXTENSION := .cc
 
+#LOCAL_SDK_VERSION := 8
+#LOCAL_NDK_VERSION := 5
+
 LOCAL_CFLAGS += \
 	-DQCC_CPU_ARM \
 	-DQCC_OS_ANDROID \
-	-DQCC_OS_GROUP_POSIX
+	-DQCC_OS_GROUP_POSIX \
+	-std=gnu++0x
+
+#alljoyn_ndk_source_root := $(HISTORICAL_NDK_VERSIONS_ROOT)/android-ndk-r$(LOCAL_NDK_VERSION)/sources
+alljoyn_ndk_source_root := $(HISTORICAL_NDK_VERSIONS_ROOT)/android-ndk-r7/sources
 
 LOCAL_C_INCLUDES := \
 	external/alljoyn/alljoyn_core/autogen \
@@ -149,8 +162,9 @@ LOCAL_C_INCLUDES := \
 	external/alljoyn/alljoyn_core/JSON \
 	external/alljoyn/alljoyn_core/src \
 	external/alljoyn/common/inc \
-	external/connectivity/stlport/stlport \
 	external/openssl/include \
+	$(alljoyn_ndk_source_root)/cxx-stl/gnu-libstdc++/libs/$(TARGET_CPU_ABI)/include \
+	$(alljoyn_ndk_source_root)/cxx-stl/gnu-libstdc++/include
 
 LOCAL_SRC_FILES := \
 	daemon/AllJoynDebugObj.cc \
@@ -234,8 +248,11 @@ LOCAL_SHARED_LIBRARIES := \
 
 LOCAL_REQUIRED_MODULES := \
 	external/openssl/crypto/libcrypto \
-	external/openssl/ssl/libssl \
-	external/connectivity/stlport
+	external/openssl/ssl/libssl
+
+LOCAL_LDLIBS := \
+	-L$(alljoyn_ndk_source_root)/cxx-stl/gnu-libstdc++/libs/$(TARGET_CPU_ABI) \
+	-lgnustl_static
 
 LOCAL_MODULE_PATH := $(TARGET_OUT_OPTIONAL_EXECUTABLES)
 LOCAL_MODULE_TAGS := optional

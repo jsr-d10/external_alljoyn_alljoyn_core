@@ -708,8 +708,6 @@ exit:
     return status;
 }
 
-
-
 QStatus Stun::RecvStunMessage(StunMessage& msg, IPAddress& addr, uint16_t& port, bool& relayed, uint32_t maxMs)
 {
     Thread* selfThread = Thread::GetThread();
@@ -764,17 +762,13 @@ QStatus Stun::RecvStunMessage(StunMessage& msg, IPAddress& addr, uint16_t& port,
             goto exit;
         }
 
-        if (find(signaledEvents.begin(),
-                 signaledEvents.end(),
-                 &stunMsgQueueModified) == signaledEvents.end()) {
-            QCC_DbgPrintf(("Aborting read on thread %s due to stop signal",
-                           selfThread ? selfThread->GetName() : "<unknown>"));
+        stunMsgQueueLock.Lock();
+        if (stunMsgQueue.empty()) {
+            stunMsgQueueLock.Unlock();
             status = ER_STOPPING_THREAD;
             goto exit;
         }
 
-        stunMsgQueueLock.Lock();
-        assert(!stunMsgQueue.empty());
         StunBuffer& sb(stunMsgQueue.front());
         storage = sb.storage;
         buf = sb.buf;

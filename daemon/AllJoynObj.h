@@ -372,6 +372,7 @@ class AllJoynObj : public BusObject, public NameListener, public TransportListen
     const InterfaceDescription::Member* lostAdvNameSignal; /**< org.alljoyn.Bus.LostAdvertisdName signal */
     const InterfaceDescription::Member* sessionLostSignal; /**< org.alljoyn.Bus.SessionLost signal */
     const InterfaceDescription::Member* mpSessionChangedSignal;  /**< org.alljoyn.Bus.MPSessionChanged signal */
+    const InterfaceDescription::Member* mpSessionJoinedSignal;  /**< org.alljoyn.Bus.JoinSession signal */
 
     /** Map of open connectSpecs to local endpoint name(s) that require the connection. */
     std::multimap<qcc::String, qcc::String> connectMap;
@@ -588,6 +589,19 @@ class AllJoynObj : public BusObject, public NameListener, public TransportListen
                               bool& isAccepted);
 
     /**
+     * Utility method used to invoke JoinSession on device local endpoint.
+     *
+     * @param sessionPort      SessionPort that received the join request.
+     * @param sessionId        Id for new session (if accepted).
+     * @param creatorName      Session creator unique name.
+     * @param joinerName       Session joiner unique name.
+     */
+    QStatus SendJoinSession(SessionPort sessionPort,
+                            SessionId sessionId,
+                            const char* joinerName,
+                            const char* creatorName);
+
+    /**
      * Utility method used to send SessionLost signal to locally attached endpoint.
      *
      * @param       entry    SessionMapEntry that was lost.
@@ -721,7 +735,7 @@ class AllJoynObj : public BusObject, public NameListener, public TransportListen
      * @param endpoint  Endpoint (virtual or remote) that has left the session.
      * @param id        Session id.
      */
-    void RemoveSessionRefs(BusEndpoint& endpoint, SessionId id);
+    void RemoveSessionRefs(const char* epName, SessionId id);
 
     /**
      * Utility function used to clean up the session map when a virtual endpoint with a
@@ -731,11 +745,11 @@ class AllJoynObj : public BusObject, public NameListener, public TransportListen
      * need to clean any virtual endpoints that might have been using that b2b ep
      * from the sessionMap
      *
-     * @param vep       Virtual that should be cleaned from sessionMap if it routes
-     *                  through b2bEp for a given session.
-     * @param b2bEp     B2B endpoint that vep must route through in order to be cleaned.
+     * @param vepName       Virtual that should be cleaned from sessionMap if it routes
+     *                      through b2bEp for a given session.
+     * @param b2bEpName     B2B endpoint that vep must route through in order to be cleaned.
      */
-    void RemoveSessionRefs(const VirtualEndpoint& vep, const RemoteEndpoint& b2bEp);
+    void RemoveSessionRefs(const qcc::String& vepName, const qcc::String& b2bEpName);
 };
 
 }

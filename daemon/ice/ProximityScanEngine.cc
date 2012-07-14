@@ -109,7 +109,6 @@ ProximityScanEngine::ProximityScanEngine(DiscoveryManager*dm) : bus(dm->bus) {
 
     QCC_DbgTrace(("ProximityScanEngine::ProximityScanEngine() called"));
     tadd_count = 1;
-    isFirstScanComplete = false;
     wifiapDroppped = false;
     wifiapAdded = false;
     request_scan = true;
@@ -123,6 +122,9 @@ ProximityScanEngine::ProximityScanEngine(DiscoveryManager*dm) : bus(dm->bus) {
 
 ProximityScanEngine::~ProximityScanEngine() {
     QCC_DbgTrace(("ProximityScanEngine::~ProximityScanEngine() called"));
+
+    StopScan();
+
     delete proximityScanner;
     proximityScanner = NULL;
 }
@@ -133,11 +135,6 @@ void ProximityScanEngine::ProcessScanResults() {
     QCC_DbgPrintf(("Size of scan results = %d", proximityScanner->scanResults.size()));
     QCC_DbgPrintf(("Size of scan Hysteresis = %d", hysteresisMap.size()));
     QCC_DbgPrintf(("Size of scan Final Map = %d", finalMap.size()));
-
-
-
-
-
 
     std::map<std::pair<qcc::String, qcc::String>, bool>::iterator it;
     std::map<std::pair<qcc::String, qcc::String>, int>::iterator hit;
@@ -263,18 +260,11 @@ void ProximityScanEngine::ProcessScanResults() {
     }
 
 
-    if (no_scan_results_count == 4) {
+    if (no_scan_results_count == 3) {
         request_scan = true;
     } else {
         request_scan = false;
     }
-
-
-    if (!isFirstScanComplete) {
-        QCC_DbgPrintf(("First scan ------- COMPLETE"));
-        isFirstScanComplete = true;
-    }
-
 
 /*
     // Extract the SSID corresponding to the BSSID since the tokenizing code did not look nice we do it in two iterations
@@ -443,10 +433,6 @@ void ProximityScanEngine::StartScan() {
     QCC_DbgTrace(("ProximityScanEngine::StartScan() called"));
 
     request_scan = true;
-
-    if (isFirstScanComplete) {
-        return;
-    }
 
     map<qcc::String, qcc::String>::iterator it;
 

@@ -1,5 +1,5 @@
 /**
- * @file IceManager.cpp
+ * @file IceManager.cc
  *
  * IceManager is responsible for executing and coordinating ICE related network operations.
  *
@@ -36,30 +36,7 @@ using namespace qcc;
 
 namespace ajn {
 
-ICEManager* ICEManager::GetInstance()
-{
-    static Mutex singletonLock;
-    static ICEManager* singleton = 0;
-
-    singletonLock.Lock();
-    if (0 == singleton) {
-        singleton = new ICEManager();
-
-        // Feature: With current implementation, STUN request pacing is
-        // handled within each Session.  It would be more consistent with
-        // the spirit of ICE if pacing were a 'machine-wide' behavior instead.
-        // To make such a change, here would be a good place to start the
-        // thread which will perform keepalives, and periodic ICE-checks.
-    }
-    singletonLock.Unlock();
-
-    return singleton;
-}
-
-ICEManager::ICEManager() :
-    ethernetInterfaceName(),
-    wifiInterfaceName(),
-    mobileNwInterfaceName()
+ICEManager::ICEManager()
 {
 }
 
@@ -79,16 +56,18 @@ ICEManager::~ICEManager(void)
 
 QStatus ICEManager::AllocateSession(bool addHostCandidates,
                                     bool addRelayedCandidates,
+                                    bool enableIpv6,
                                     ICESessionListener* listener,
                                     ICESession*& session,
-                                    STUNServerInfo stunInfo)
+                                    STUNServerInfo stunInfo,
+                                    IPAddress onDemandAddress,
+                                    IPAddress persistentAddress)
 {
     QStatus status = ER_OK;
 
-    session = new ICESession(addHostCandidates, addRelayedCandidates, listener, stunInfo,
-                             ethernetInterfaceName, wifiInterfaceName, mobileNwInterfaceName);
+    session = new ICESession(addHostCandidates, addRelayedCandidates, listener, stunInfo, onDemandAddress, persistentAddress);
 
-    status = session->Init();
+    status = session->Init(enableIpv6);
 
     if (ER_OK == status) {
         lock.Lock();                // Synch with another thread potentially calling destructor.
@@ -121,14 +100,6 @@ QStatus ICEManager::DeallocateSession(ICESession*& session)
     delete session;
 
     return status;
-}
-
-void ICEManager::SetInterfaceNamePrefixes(String ethPrefix, String wifiPrefix, String mobileNwPrefix)
-{
-    QCC_DbgPrintf(("ICEManager::SetInterfaceNamePrefixes()\n"));
-    ethernetInterfaceName = ethPrefix;
-    wifiInterfaceName = wifiPrefix;
-    mobileNwInterfaceName = mobileNwPrefix;
 }
 
 } //namespace ajn

@@ -31,8 +31,8 @@
 #include "StunMessage.h"
 #include "Stun.h"
 #include "StunAttribute.h"
-#include "ICECandidate.h"
 #include "ICESession.h"
+#include "ICECandidatePair.h"
 
 namespace ajn {
 
@@ -53,11 +53,12 @@ class ICEPacketStream : public PacketStream {
     ICEPacketStream();
 
     /** Constructor */
-    ICEPacketStream(ICESession& iceSession, Stun& stunPtr, _ICECandidate::ICECandidateType candidateType);
+    ICEPacketStream(ICESession& iceSession, Stun& stunPtr, const ICECandidatePair& selectedPair);
 
     /** Copy constructor */
     ICEPacketStream(const ICEPacketStream& other);
 
+    /* Assignment */
     ICEPacketStream& operator=(const ICEPacketStream& other);
 
     /** Destructor */
@@ -72,6 +73,12 @@ class ICEPacketStream : public PacketStream {
      * Stop the PacketStream.
      */
     QStatus Stop();
+
+    /**
+     * Return true iff ICEPacketStream has a usable socket.
+     * @return true iff ICEPacketStream has a usable socket.
+     */
+    bool HasSocket() { return sock != SOCKET_ERROR; }
 
     /**
      * Get UDP port.
@@ -108,18 +115,7 @@ class ICEPacketStream : public PacketStream {
      *
      * @return MTU of PacketSource
      */
-    size_t GetSourceMTU() { return mtuWithStunOverhead; }
-
-    /**
-     * Push zero or more bytes into the sink.
-     *
-     * @param buf          Buffer containing data bytes to be sent
-     * @param numBytes     Number of bytes from buf to send to sink. (Must be less that or equal to MTU of PacketSink.)
-     * @param dest         Destination for packet bytes.
-     * @param controlBytes true iff buf is control data.
-     * @return   ER_OK if successful.
-     */
-    QStatus PushPacketBytes(const void* buf, size_t numBytes, PacketDest& dest, bool controlBytes);
+    size_t GetSourceMTU() { return usingTurn ? mtuWithStunOverhead : interfaceMtu; }
 
     /**
      * Push zero or more bytes into the sink.
@@ -129,9 +125,7 @@ class ICEPacketStream : public PacketStream {
      * @param dest         Destination for packet bytes.
      * @return   ER_OK if successful.
      */
-    QStatus PushPacketBytes(const void* buf, size_t numBytes, PacketDest& dest) {
-        return PushPacketBytes(buf, numBytes, dest, false);
-    }
+    QStatus PushPacketBytes(const void* buf, size_t numBytes, PacketDest& dest);
 
     /**
      * Get the Event that indicates when data can be pushed to sink.
@@ -145,7 +139,7 @@ class ICEPacketStream : public PacketStream {
      *
      * @return MTU of PacketSink
      */
-    size_t GetSinkMTU() { return mtuWithStunOverhead; }
+    size_t GetSinkMTU() { return usingTurn ? mtuWithStunOverhead : interfaceMtu; }
 
     /**
      * Human readable form of UDPPacketDest.
@@ -158,13 +152,6 @@ class ICEPacketStream : public PacketStream {
      * @return hmac key (from ICESession)
      */
     const qcc::String& GetHmacKey() const { return hmacKey; }
-
-    /**
-     * Get ICE destination.
-     *
-     * @return ICE negociated destination
-     */
-    PacketDest GetICEDestination() const { return GetPacketDest(remoteAddress, remotePort); }
 
     /**
      * Get ICE destination address.
@@ -181,19 +168,19 @@ class ICEPacketStream : public PacketStream {
     uint16_t GetICERemotePort() const { return remotePort; }
 
     /**
-     * Return the ICE candidate type associated with this ICEPacketStream.
-     *
-     * @return ICECandidateType associated with this ICEPacketStream.
-     */
-    _ICECandidate::ICECandidateType GetCandidateType() const { return iceCandidateType; }
-
-    /**
      * Return the TURN server's refresh period.
      * This call returns 0 unless the candidate type is Relayed_Candidate.
      *
      * @return TURN server refresh period in milliseconds.
      */
-    uint32_t GetTurnRefreshPeriod() const { return turnRefreshPeriod; }
+    uint32_t GetTurnRefreshPeriod()
+    {
+        uint32_t refreshPeriod;
+        turnRefreshPeriodUpdateLock.Lock();
+        refreshPeriod = turnRefreshPeriod;
+        turnRefreshPeriodUpdateLock.Unlock();
+        return refreshPeriod;
+    }
 
     /**
      * Return the timestamp of the last TURN server's refresh.
@@ -201,13 +188,6 @@ class ICEPacketStream : public PacketStream {
      * @return time of last TURN server refresh.
      */
     uint64_t GetTurnRefreshTimestamp() const { return turnRefreshTimestamp; }
-
-    /**
-     * Set the timestamp of the last TURN server's refresh.
-     *
-     * @param time  64-bit timestamp of last TURN refresh.
-     */
-    void SetTurnRefreshTimestamp(uint64_t time)  { turnRefreshTimestamp = time; }
 
     /**
      * Return the username used for TURN server authentication.
@@ -224,37 +204,69 @@ class ICEPacketStream : public PacketStream {
     uint32_t GetStunKeepAlivePeriod() const { return stunKeepAlivePeriod; }
 
     /**
-     * Compose a STUN message with the passed in data.
+     * Return true iff ICEPacketStream is using the local relay candidate.
+     * @return true iff ICEPacketStream is using local relay candidate.
      */
-    static QStatus ComposeStunMessage(const void* buf, size_t numBytes, uint8_t* renderBuf, size_t& renderSize,
-                                      qcc::IPAddress destnAddress, uint16_t destnPort, String userName,
-                                      const qcc::String& key);
+    bool IsLocalTurn() const { return localTurn; }
 
     /**
-     * Strip STUN overhead from a received message.
+     * Return true iff ICEPacketStream is using the local host candidate.
+     * @return true iff ICEPacketStream is using the local host candidate.
      */
-    static QStatus StripStunOverhead(uint8_t* recvBuf, size_t rcvdBytes, void* dataBuf, size_t& dataSize,
-                                     qcc::IPAddress hostAddress, uint16_t hostPort, size_t keyLen);
+    bool IsLocalHost() const { return localHost; }
+
+    /**
+     * Compose and send a NAT keepalive message.
+     */
+    QStatus SendNATKeepAlive(void);
+
+    /**
+     * Compose and send a TURN refresh message.
+     * @param time  64-bit timestamp.
+     */
+    QStatus SendTURNRefresh(uint64_t time);
+
 
   private:
     qcc::IPAddress ipAddress;
     uint16_t port;
     qcc::IPAddress remoteAddress;
     uint16_t remotePort;
+    qcc::IPAddress remoteMappedAddress;
+    uint16_t remoteMappedPort;
+    qcc::IPAddress turnAddress;
+    uint16_t turnPort;
+    qcc::IPAddress relayServerAddress;
+    uint16_t relayServerPort;
     int sock;
     qcc::Event* sourceEvent;
     qcc::Event* sinkEvent;
     size_t mtuWithStunOverhead;
     size_t interfaceMtu;
-    _ICECandidate::ICECandidateType iceCandidateType;
+    bool usingTurn;
+    bool localTurn;
+    bool localHost;
     qcc::String hmacKey;
     qcc::String turnUsername;
+    Mutex turnRefreshPeriodUpdateLock;
     uint32_t turnRefreshPeriod;
     uint64_t turnRefreshTimestamp;
     uint32_t stunKeepAlivePeriod;
     Mutex sendLock;
     uint8_t* rxRenderBuf;
     uint8_t* txRenderBuf;
+
+    /**
+     * Compose a STUN message with the passed in data.
+     */
+    QStatus ComposeStunMessage(const void* buf,
+                               size_t numBytes,
+                               qcc::ScatterGatherList& msgSG);
+
+    /**
+     * Strip STUN overhead from a received message.
+     */
+    QStatus StripStunOverhead(size_t rcvdBytes, void* dataBuf, size_t dataBufLen, size_t& actualBytes);
 };
 
 }  /* namespace */

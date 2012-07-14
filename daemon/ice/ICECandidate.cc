@@ -1,5 +1,5 @@
 /**
- * @file ICECandidate.cpp
+ * @file ICECandidate.cc
  *
  *
  */
@@ -44,8 +44,7 @@ _ICECandidate::_ICECandidate(_ICECandidate::ICECandidateType type,
                              IPEndpoint base,
                              Component* component,
                              SocketType transportProtocol,
-                             StunActivity* stunActivity,
-                             String interfaceName) :
+                             StunActivity* stunActivity) :
     type(type),
     priority(),
     endPoint(endPoint),
@@ -60,8 +59,7 @@ _ICECandidate::_ICECandidate(_ICECandidate::ICECandidateType type,
     terminating(false),
     sharedStunRelayedCandidate(NULL),
     sharedStunServerReflexiveCandidate(NULL),
-    candidateThread(NULL),
-    InterfaceName(interfaceName)
+    candidateThread(NULL)
 {
     QCC_DbgTrace(("ICECandidate::ICECandidate1(%p, type=%d)", this, type));
     stunActivity->SetCandidate(ICECandidate(this));
@@ -213,6 +211,7 @@ void _ICECandidate::AwaitRequestsAndResponses()
             uint64_t startTime = GetTimestamp64();
             while ((session->GetState() == ICESession::ICECandidatesGathered) &&
                    (session->ChecksStarted() == false) &&
+                   (!thisThread->IsStopping()) &&
                    (GetTimestamp64() < (startTime + 10000))) {
                 session->Unlock();
                 qcc::Sleep(100);
@@ -283,7 +282,7 @@ QStatus _ICECandidate::ReadReceivedMessage(uint32_t timeoutMsec)
 
     if (status != ER_OK) {
         if (status != ER_STOPPING_THREAD) {
-            QCC_LogError(status, ("ReadReceivedMessage status = %d", status));
+            QCC_LogError(status, ("ReadReceivedMessage failed (ICECandidate=%p)", this));
         }
         return status;
     }
@@ -375,8 +374,7 @@ QStatus _ICECandidate::ReadReceivedMessage(uint32_t timeoutMsec)
                                                                    base,
                                                                    component,
                                                                    sockType,
-                                                                   reflexiveCandidateStunActivity,
-                                                                   InterfaceName);
+                                                                   reflexiveCandidateStunActivity);
 
                     // store server_reflexive candidate (reuse host candidate's stun object)
                     stunActivity->stun->GetComponent()->AddCandidate(reflexiveCandidate);
@@ -448,6 +446,7 @@ QStatus _ICECandidate::ReadReceivedMessage(uint32_t timeoutMsec)
                     if (sharedStunRelayedCandidate) {
                         delete sharedStunRelayedCandidate;
                     }
+
                     sharedStunRelayedCandidate = new ICECandidate(relayedCandidate); // to demux received check messages later
                 }
             }
@@ -579,7 +578,6 @@ QStatus _ICECandidate::ReadReceivedMessage(uint32_t timeoutMsec)
             // ToDo: the server MUST reject the request
             // with an error response.  This response MUST use an error code
             // of 401 (Unauthorized).
-
             goto exit;
         }
 
@@ -641,15 +639,14 @@ QStatus _ICECandidate::ReadReceivedMessage(uint32_t timeoutMsec)
             // Recall that this Stun object may be shared by multiple local
             // candidates (host, server-reflexive, relayed,) each belonging to perhaps multiple candidate pairs.
             ICECandidatePair* constructedPair = NULL;
-            if (receivedMsgWasRelayed) {
+            if (receivedMsgWasRelayed && sharedStunRelayedCandidate) {
                 constructedPair = component->GetICEStream()->MatchCheckListEndpoint((*sharedStunRelayedCandidate)->endPoint, remote);
             } else {
                 constructedPair = component->GetICEStream()->MatchCheckListEndpoint(endPoint, remote);
-                if (NULL == constructedPair) {
+                if ((NULL == constructedPair) && sharedStunServerReflexiveCandidate) {
                     constructedPair = component->GetICEStream()->MatchCheckListEndpoint((*sharedStunServerReflexiveCandidate)->endPoint, remote);
                 }
             }
-
             if (!constructedPair) {
                 // @@ JP
 #if 0

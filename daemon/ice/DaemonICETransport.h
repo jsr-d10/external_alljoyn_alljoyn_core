@@ -27,8 +27,10 @@
 #error Only include DaemonICETransport.h in C++ code.
 #endif
 
-
 #include <qcc/platform.h>
+
+#include <set>
+
 #include <qcc/String.h>
 #include <qcc/Mutex.h>
 #include <qcc/Thread.h>
@@ -56,15 +58,15 @@ using namespace qcc;
 // receive the candidates from the Service on the remote daemon.
 // Units in ms
 // PPN - Need to review this time
-const uint32_t ICE_CLIENT_SESSION_WAIT_TIMEOUT = 300000;
+const uint32_t ICE_CLIENT_SESSION_WAIT_TIMEOUT = 15000;
 
 // Maximum time in milli seconds that the DaemonICETransport will wait for the ICESession to allocate an ICE session
 // PPN - Need to review this time
-const uint32_t ICE_ALLOCATE_SESSION_WAIT_TIMEOUT = 300000;
+const uint32_t ICE_ALLOCATE_SESSION_WAIT_TIMEOUT = 15000;
 
 // Maximum time in milli seconds that the DaemonICETransport will wait to receive the new refreshed tokens
 // PPN - Need to review this time
-const uint32_t ICE_REFRESH_TOKENS_WAIT_TIMEOUT = 300000;
+const uint32_t ICE_REFRESH_TOKENS_WAIT_TIMEOUT = 15000;
 
 namespace ajn {
 
@@ -264,16 +266,15 @@ class DaemonICETransport : public Transport, public RemoteEndpoint::EndpointList
     QStatus Connect(const char* connectSpec, const SessionOpts& opts, BusEndpoint** newep);
 
     /**
-     * Compose a bus address based on the input parameters.
+     * Disconnect from a specified AllJoyn/DBus address.
      *
-     * @param busAddr    Reference to the bus address object to be modified
-     * @param senderName Name of the sender initiating the connect request
-     * @param foundName  Found name to which the sender is trying to connect
+     * @param connectSpec    The connectSpec used in Connect.
+     *
      * @return
      *      - ER_OK if successful.
      *      - an error status otherwise.
      */
-    QStatus ComposeBusAddrForConnect(String& busAddr, String senderName, String foundName);
+    QStatus Disconnect(const char* connectSpec);
 
     /**
      * Start listening for incomming connections on a specified bus address.
@@ -424,7 +425,7 @@ class DaemonICETransport : public Transport, public RemoteEndpoint::EndpointList
      *
      * @return  true if the tokens have not expired, false otherwise.
      */
-    QStatus GetNewTokensFromServer(bool client, STUNServerInfo& stunInfo, String matchID, String remotePeerAddress, String remoteName);
+    QStatus GetNewTokensFromServer(bool client, STUNServerInfo& stunInfo, String remotePeerAddress);
 
     /**
      * @internal
@@ -459,11 +460,11 @@ class DaemonICETransport : public Transport, public RemoteEndpoint::EndpointList
 
     BusAttachment& m_bus;                                          /**< The message bus for this transport */
     DiscoveryManager* m_dm;                                        /**< The Discovery Manager used for discovery */
-    ICEManager* m_iceManager;                                      /**< The ICE Manager used for managing ICE operations */
+    ICEManager m_iceManager;                                       /**< The ICE Manager used for managing ICE operations */
     bool m_stopping;                                               /**< True if Stop() has been called but endpoints still exist */
     TransportListener* m_listener;                                 /**< Registered TransportListener */
-    std::list<DaemonICEEndpoint*> m_authList;                      /**< List of authenticating endpoints */
-    std::list<DaemonICEEndpoint*> m_endpointList;                  /**< List of active endpoints */
+    std::set<DaemonICEEndpoint*> m_authList;                       /**< Set of authenticating endpoints */
+    std::set<DaemonICEEndpoint*> m_endpointList;                   /**< Set of active endpoints */
     Mutex m_endpointListLock;                                      /**< Mutex that protects the endpoint and auth lists */
 
     ///< Event that indicates that a new AllocateICESession request has been received.
@@ -472,34 +473,18 @@ class DaemonICETransport : public Transport, public RemoteEndpoint::EndpointList
     /* Instance of the packet engine associated with the ICE transport*/
     PacketEngine m_packetEngine;
 
-    /*
-     * Internal structure used to store information related to the initiator and receiver of a session creation request.
-     */
-    struct SessionReceiverInfo {
-        String m_guid;           /*GUID of the remote daemon*/
-        String m_foundName;      /*Well Known name of the discovered Service on the remote daemon*/
-
-        SessionReceiverInfo() { };
-
-        SessionReceiverInfo(String guid, String foundName) {
-            m_guid = guid;
-            m_foundName = foundName;
-        }
-    };
-
     Mutex m_IncomingICESessionsLock; /**< Mutex that protects IncomingICESessions */
 
     /*
-     * Map of the session request initiator names and the corresponding session receiver.
+     * List of the GUIDs of the remote daemons trying to connected to this daemon.
      */
-    multimap<String, SessionReceiverInfo> IncomingICESessions;
+    list<String> IncomingICESessions;
 
     /** AllocateICESessionThread handles a AllocateICESession request from a remote client on a separate thread */
     class AllocateICESessionThread : public Thread, public ThreadListener {
       public:
-        AllocateICESessionThread(DaemonICETransport* transportObj, String serviceName, String clientName, String clientGUID)
-            : Thread("AllocateICESessionThread"), transportObj(transportObj), serviceName(serviceName),
-            clientName(clientName), clientGUID(clientGUID) { }
+        AllocateICESessionThread(DaemonICETransport* transportObj, String clientGUID)
+            : Thread("AllocateICESessionThread"), transportObj(transportObj), clientGUID(clientGUID) { }
 
         void ThreadExit(Thread* thread);
 
@@ -508,8 +493,6 @@ class DaemonICETransport : public Transport, public RemoteEndpoint::EndpointList
 
       private:
         DaemonICETransport* transportObj;
-        String serviceName;
-        String clientName;
         String clientGUID;
     };
 
@@ -559,11 +542,9 @@ class DaemonICETransport : public Transport, public RemoteEndpoint::EndpointList
      * @brief Populate IncomingICESessions with the details of a incoming request for
      * ICE Session Allocation.
      *
-     * @param serviceName	    Unique name of the service that is being contacted by the client
      * @param guid              GUID of the remote daemon that is the initiator of this session request
-     * @param clientName        Name of the client that is the initiator of this session request
      */
-    void RecordIncomingICESessions(String serviceName, String guid, String clientName);
+    void RecordIncomingICESessions(String guid);
 
     /**
      * @internal
@@ -592,7 +573,7 @@ class DaemonICETransport : public Transport, public RemoteEndpoint::EndpointList
     class ICECallback {
       public:
         ICECallback(TransportListener*& listener, DaemonICETransport* DaemonICETransport) : m_listener(listener), m_daemonICETransport(DaemonICETransport) { }
-        void ICE(ajn::DiscoveryManager::CallbackType cbType, const String& name, const String& guid, const vector<String>* nameList, uint8_t ttl = 0xFF);
+        void ICE(ajn::DiscoveryManager::CallbackType cbType, const String& guid, const vector<String>* nameList, uint8_t ttl = 0xFF);
       private:
         TransportListener*& m_listener;
         DaemonICETransport* m_daemonICETransport;
@@ -646,15 +627,6 @@ class DaemonICETransport : public Transport, public RemoteEndpoint::EndpointList
      * attacks from "abroad" and trust ourselves implicitly.
      */
     static const uint32_t ALLJOYN_MAX_COMPLETED_CONNECTIONS_ICE_DEFAULT = 50;
-
-    /*Ethernet interface name prefix. For eg. eth */
-    String ethernetInterfaceName;
-
-    /* Wi-Fi interface name prefix. For eg. wlan */
-    String wifiInterfaceName;
-
-    /* Mobile Network interface name prefix. For eg. ppp */
-    String mobileNwInterfaceName;
 
     /* Timer used to handle the alarms */
     Timer daemonICETransportTimer;

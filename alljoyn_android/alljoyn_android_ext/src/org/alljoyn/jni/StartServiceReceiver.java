@@ -1,10 +1,9 @@
 /**
  * @file
- * AllJoyn-Daemon module property database classes
  */
 
 /******************************************************************************
- * Copyright 2010-2011, Qualcomm Innovation Center, Inc.
+ * Copyright 2012, Qualcomm Innovation Center, Inc.
  *
  *    Licensed under the Apache License, Version 2.0 (the "License");
  *    you may not use this file except in compliance with the License.
@@ -18,37 +17,26 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  ******************************************************************************/
+package org.alljoyn.jni;
 
-#ifndef _PROPERTYDB_H
-#define _PROPERTYDB_H
+import android.content.BroadcastReceiver;
+import android.content.Intent;
+import android.content.Context;
+import android.net.wifi.WifiManager;
+import android.util.Log;
 
-#include <qcc/platform.h>
-#include <qcc/ManagedObj.h>
-#include <qcc/String.h>
-#include <qcc/StringMapKey.h>
-
-namespace ajn {
-
-class _PropertyMap;
-
-class _PropertyDB {
-  public:
-    _PropertyDB() { }
-    virtual ~_PropertyDB();
-
-    void Set(qcc::String module, qcc::String name, qcc::String value);
-    qcc::String Get(qcc::String module, qcc::String name);
-
-  private:
-    std::unordered_map<qcc::StringMapKey, _PropertyMap*> m_modules;
-};
-
-/**
- * Managed object wrapper for property database class.
- */
-typedef qcc::ManagedObj<_PropertyDB> PropertyDB;
-
-
-} // namespace ajn
-
-#endif // _PROPERTYDB_H
+public class StartServiceReceiver extends BroadcastReceiver{
+	
+	public StartServiceReceiver(){
+		super();
+	}
+	
+	@Override
+	public void onReceive(Context c, Intent intent){
+			
+			Intent serviceIntent = new Intent();
+			serviceIntent.setAction("org.alljoyn.jni.alljoynandroidext");
+			c.startService(serviceIntent);
+		
+	}
+}

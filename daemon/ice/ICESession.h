@@ -79,7 +79,7 @@ static const int ICE_CREDENTIAL_PWD_CHAR_LENGTH = (128 / 8);
 static const uint32_t TURN_PERMISSION_REFRESH_PERIOD_SECS = 300;
 
 // Refresh a little before the expiration.
-static const uint32_t TURN_REFRESH_WARNING_PERIOD_SECS = 60;
+static const uint32_t TURN_REFRESH_WARNING_PERIOD_SECS = 15;
 
 // Interval at which to send the NAT keepalives
 static const uint32_t STUN_KEEP_ALIVE_INTERVAL_IN_MILLISECS = 15000;
@@ -199,13 +199,23 @@ class ICESession {
 
     uint32_t GetTURNRefreshPeriod(void) { return((TURN_PERMISSION_REFRESH_PERIOD_SECS - TURN_REFRESH_WARNING_PERIOD_SECS) * 1000); };
 
-    uint32_t GetSTUNKeepAlivePeriod(void) { return (STUN_KEEP_ALIVE_INTERVAL_IN_MILLISECS * 1000); };
+    uint32_t GetSTUNKeepAlivePeriod(void) { return STUN_KEEP_ALIVE_INTERVAL_IN_MILLISECS; };
 
     friend class ICEManager;
 
     void StopPacingThreadAndClearStunQueue(void);
 
     String GetusernameForShortTermCredential() { return usernameForShortTermCredential; };
+
+    /**
+     * Return the address of the relay server
+     */
+    IPAddress GetRelayServerAddr() { return TurnServer.addr; };
+
+    /**
+     * Return the port of the relay server
+     */
+    uint16_t GetRelayServerPort() { return TurnServer.port; };
 
   private:
     uint8_t* hmacKey;
@@ -292,14 +302,17 @@ class ICESession {
 
     STUNServerInfo STUNInfo;
 
+    IPAddress OnDemandAddress;
+
+    IPAddress PersistentAddress;
+
     // Private ctor, used only by friend ICEManager
     ICESession(bool addHostCandidates,
                bool addRelayedCandidates,
                ICESessionListener* listener,
                STUNServerInfo stunInfo,
-               String ethPrefix,
-               String wifiPrefix,
-               String mobileNwPrefix) :
+               IPAddress onDemandAddress,
+               IPAddress persistentAddress) :
         hmacKeyLen(0),
         TurnServerAvailable(false),
         terminating(false),
@@ -319,9 +332,8 @@ class ICESession {
         checksStarted(false),
         listenerNotifiedOnSuccessOrFailure(false),
         STUNInfo(stunInfo),
-        ethernetInterfaceName(ethPrefix),
-        wifiInterfaceName(wifiPrefix),
-        mobileNwInterfaceName(mobileNwPrefix) {
+        OnDemandAddress(onDemandAddress),
+        PersistentAddress(persistentAddress) {
 
         usernameForShortTermCredential = STUNInfo.acct;
 
@@ -350,7 +362,7 @@ class ICESession {
     }
 
     // Private, used only by friend ICEManager
-    QStatus Init(void);
+    QStatus Init(bool enableIpv6);
 
     void SetState(ICESessionState state);
 
@@ -364,7 +376,7 @@ class ICESession {
     QStatus GetIPAddressFromConnectionData(String& connectionData,
                                            IPAddress& IPAddressParm);
 
-    QStatus GatherHostCandidates(void);
+    QStatus GatherHostCandidates(bool enableIpv6);
 
     QStatus StartStunTurnPacingThread(void);
 
@@ -391,7 +403,7 @@ class ICESession {
 
     void AssignPriorities(void);
 
-    uint32_t AssignPriority(uint16_t componentID, const ICECandidate& IceCandidate, _ICECandidate::ICECandidateType candidateType, String interfaceName);
+    uint32_t AssignPriority(uint16_t componentID, const ICECandidate& IceCandidate, _ICECandidate::ICECandidateType candidateType);
 
     void AssignPrioritiesPerICEStream(const ICEStream* stream);
 
@@ -437,16 +449,6 @@ class ICESession {
     QStatus DeallocateTurn(Stun* stun);
 
     bool RelayedCandidateActivityIsStale(StunActivity* stunActivity);
-
-    /*Ethernet interface name prefix. For eg. eth */
-    String ethernetInterfaceName;
-
-    /* Wi-Fi interface name prefix. For eg. wlan */
-    String wifiInterfaceName;
-
-    /* Mobile Network interface name prefix. For eg. ppp */
-    String mobileNwInterfaceName;
-
 };
 
 } //namespace ajn

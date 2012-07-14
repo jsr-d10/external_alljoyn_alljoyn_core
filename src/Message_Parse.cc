@@ -577,6 +577,21 @@ QStatus _Message::UnmarshalArgs(const qcc::String& expectedSignature, const char
             return status;
         }
     }
+    /*
+     * Check we don't have two or more threads trying to unmarshall the message args at the same
+     * time. Unlikely but definitely possible with broadcast signals and the bundled daemon.
+     */
+    if (IncrementAndFetch(&busy) > 1) {
+        DecrementAndFetch(&busy);
+        qcc::Sleep(1);
+    }
+    /*
+     * Nothing to do if message args have already been unmarshalled.
+     */
+    if (msgArgs) {
+        DecrementAndFetch(&busy);
+        return ER_OK;
+    }
     if (msgHeader.flags & ALLJOYN_FLAG_ENCRYPTED) {
         bool broadcast = (hdrFields.field[ALLJOYN_HDR_FIELD_DESTINATION].typeId == ALLJOYN_INVALID);
         size_t hdrLen = bodyPtr - (uint8_t*)msgBuf;
@@ -654,6 +669,7 @@ ExitUnmarshalArgs:
     } else {
         QCC_LogError(status, ("UnmarshalArgs failed"));
     }
+    DecrementAndFetch(&busy);
     return status;
 }
 
@@ -762,7 +778,15 @@ static QStatus PullExact(Source& source,
             status = source.PullBytes(bufPos, toRead, bytesRead, PULL_TIMEOUT(toRead));
         }
         if (status != ER_OK) {
-            QCC_DbgPrintf(("PullBytes %s", QCC_StatusText(status)));
+            /*
+             * Once we have started to unmarshal a message we must finish so we
+             * ignore alerts on the rx thread.
+             */
+            if (status == ER_ALERTED_THREAD) {
+                QCC_LogError(status, ("PullExact ALERTED continuing"));
+                continue;
+            }
+            QCC_DbgPrintf(("PullExact %s", QCC_StatusText(status)));
             break;
         }
         assert(bytesRead > 0);
@@ -988,7 +1012,7 @@ QStatus _Message::Unmarshal(RemoteEndpoint& endpoint, bool checkSender, bool ped
         /*
          * An invalid field type is an error
          */
-        if ((fieldId == ALLJOYN_HDR_FIELD_INVALID)) {
+        if (fieldId == ALLJOYN_HDR_FIELD_INVALID) {
             status = ER_BUS_BAD_HEADER_FIELD;
             goto ExitUnmarshal;
         }
@@ -1182,6 +1206,13 @@ ExitUnmarshal:
         QCC_DbgHLPrintf(("Serial number was invalid for (via endpoint %s) message:\n%s", rcvEndpointName.c_str(), ToString().c_str()));
         break;
 
+    case ER_ALERTED_THREAD:
+        /*
+         * The rx thread was alerted before any data was read - just return this status code.
+         */
+        QCC_LogError(status, ("Message::Unmarshal rx thread was alerted for endpoint %s", endpoint.GetUniqueName().c_str()));
+        break;
+
     default:
         /*
          * There was an unrecoverable failure while unmarshaling the message, cleanup before we return.
@@ -1190,7 +1221,7 @@ ExitUnmarshal:
         delete [] _msgBuf;
         _msgBuf = NULL;
         ClearHeader();
-        if (status != ER_SOCK_OTHER_END_CLOSED) {
+        if ((status != ER_SOCK_OTHER_END_CLOSED) && (status != ER_STOPPING_THREAD)) {
             QCC_LogError(status, ("Failed to unmarshal message received on %s", endpoint.GetUniqueName().c_str()));
         }
     }
