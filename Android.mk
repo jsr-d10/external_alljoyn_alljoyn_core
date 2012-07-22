@@ -7,16 +7,15 @@ include $(CLEAR_VARS)
 LOCAL_CPP_EXTENSION := .cc
 
 LOCAL_SDK_VERSION := 8
-LOCAL_NDK_VERSION := 5
+LOCAL_NDK_VERSION := 6
 LOCAL_NDK_STL_VARIANT := gnustl_static
 #LOCAL_ALLOW_UNDEFINED_SYMBOLS := true
-
 
 LOCAL_CFLAGS += \
 	-DQCC_CPU_ARM \
 	-DQCC_OS_ANDROID \
 	-DQCC_OS_GROUP_POSIX \
-	-std=gnu++0x
+	-D_GLIBCXX_PERMIT_BACKWARD_HASH
 
 alljoyn_ndk_source_root := $(HISTORICAL_NDK_VERSIONS_ROOT)/android-ndk-r$(LOCAL_NDK_VERSION)/sources
 #alljoyn_ndk_source_root := $(HISTORICAL_NDK_VERSIONS_ROOT)/android-ndk-r5/sources
@@ -26,10 +25,9 @@ LOCAL_C_INCLUDES := \
 	external/alljoyn/alljoyn_core/inc \
 	external/alljoyn/alljoyn_core/src \
 	external/alljoyn/alljoyn_core/autogen \
-	external/openssl/include
-
-#	$(alljoyn_ndk_source_root)/cxx-stl/gnu-libstdc++/libs/$(TARGET_CPU_ABI)/include \
-#	$(alljoyn_ndk_source_root)/cxx-stl/gnu-libstdc++/include
+	external/openssl/include \
+	$(alljoyn_ndk_source_root)/cxx-stl/gnu-libstdc++/libs/$(TARGET_CPU_ABI)/include \
+	$(alljoyn_ndk_source_root)/cxx-stl/gnu-libstdc++/include
 
 LOCAL_SRC_FILES := \
 	../common/src/ASN1.cc \
@@ -148,7 +146,7 @@ LOCAL_CFLAGS += \
 	-DQCC_CPU_ARM \
 	-DQCC_OS_ANDROID \
 	-DQCC_OS_GROUP_POSIX \
-	-std=gnu++0x
+	-D_GLIBCXX_PERMIT_BACKWARD_HASH
 
 #alljoyn_ndk_source_root := $(HISTORICAL_NDK_VERSIONS_ROOT)/android-ndk-r$(LOCAL_NDK_VERSION)/sources
 alljoyn_ndk_source_root := $(HISTORICAL_NDK_VERSIONS_ROOT)/android-ndk-r7/sources
@@ -250,9 +248,9 @@ LOCAL_REQUIRED_MODULES := \
 	external/openssl/crypto/libcrypto \
 	external/openssl/ssl/libssl
 
-LOCAL_LDLIBS := \
-	-L$(alljoyn_ndk_source_root)/cxx-stl/gnu-libstdc++/libs/$(TARGET_CPU_ABI) \
-	-lgnustl_static
+#LOCAL_LDLIBS := \
+#	-L$(alljoyn_ndk_source_root)/cxx-stl/gnu-libstdc++/libs/$(TARGET_CPU_ABI) \
+#	-lgnustl_static
 
 LOCAL_MODULE_PATH := $(TARGET_OUT_OPTIONAL_EXECUTABLES)
 LOCAL_MODULE_TAGS := optional

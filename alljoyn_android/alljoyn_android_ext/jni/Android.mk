@@ -75,9 +75,8 @@ LOCAL_SRC_FILES := \
 #
 LOCAL_LDLIBS := \
 	-L$(NDK_PLATFORMS_ROOT)/$(TARGET_PLATFORM)/arch-arm/usr/lib -L$(ALLJOYN_DIST)/lib -L$(ANDROID_SRC)/out/target/product/generic/system/lib \
-	-L$(NDK_ROOT)/sources/cxx-stl/gnu-libstdc++/libs/armeabi \
-	-llog -lz -ldl -lalljoyn -lm -lc -lstdc++ -lcrypto -lgcc -lgnustl_static
-	
+	-llog -lz -ldl -lalljoyn -lm -lc -lcrypto -lgcc
+
 # By default, ARM target binaries will be generated in 'thumb' mode, where
 # each instruction are 16-bit wide. You can define this variable to 'arm'
 # if you want to force the generation of the module's object files in
