@@ -42,9 +42,13 @@ namespace ajn {
 class ICEPacketStream : public PacketStream {
   public:
 
+    /* The value of TURN_ACCT_TOKEN_MAX_SIZE + TURN_ACCT_TOKEN_ATTRIBUTE_HEADER_SIZE accounts for the max size of the
+     * TURN username attribute. As this is something that is sent by the server during run time, there is no way
+     * for us to know that statically during initialization. */
     static const uint32_t STUN_OVERHEAD = StunMessage::HEADER_SIZE + StunAttributeXorPeerAddress::ATTR_SIZE_WITH_HEADER +
                                           StunAttribute::ATTR_HEADER_SIZE + StunAttributeMessageIntegrity::ATTR_SIZE_WITH_HEADER +
-                                          StunAttributeFingerprint::ATTR_SIZE_WITH_HEADER;
+                                          StunAttributeFingerprint::ATTR_SIZE_WITH_HEADER + TURN_ACCT_TOKEN_MAX_SIZE +
+                                          TURN_ACCT_TOKEN_ATTRIBUTE_HEADER_SIZE;
 
     /** Construct a PacketDest from a addr,port */
     static PacketDest GetPacketDest(const qcc::IPAddress& addr, uint16_t port);
@@ -79,6 +83,20 @@ class ICEPacketStream : public PacketStream {
      * @return true iff ICEPacketStream has a usable socket.
      */
     bool HasSocket() { return sock != SOCKET_ERROR; }
+
+    /**
+     * Get the PacketEngineAcceptCB timeout alarm.
+     *
+     * @return Alarm used to indicate PacketEngineAccept timeout.
+     */
+    const qcc::Alarm& GetTimeoutAlarm() const { return timeoutAlarm; }
+
+    /**
+     * Set the PacketEngineAcceptCB timeout alarm.
+     *
+     * @param timeoutAlarm    Alarm used to indicate PacketEngine accept timeout.
+     */
+    void SetTimeoutAlarm(const qcc::Alarm& timeoutAlarm) { this->timeoutAlarm = timeoutAlarm; }
 
     /**
      * Get UDP port.
@@ -216,6 +234,12 @@ class ICEPacketStream : public PacketStream {
     bool IsLocalHost() const { return localHost; }
 
     /**
+     * Return true iff ICEPacketStream is using the remote host candidate.
+     * @return true iff ICEPacketStream is using the remote host candidate.
+     */
+    bool IsRemoteHost() const { return remoteHost; }
+
+    /**
      * Compose and send a NAT keepalive message.
      */
     QStatus SendNATKeepAlive(void);
@@ -246,6 +270,7 @@ class ICEPacketStream : public PacketStream {
     bool usingTurn;
     bool localTurn;
     bool localHost;
+    bool remoteHost;
     qcc::String hmacKey;
     qcc::String turnUsername;
     Mutex turnRefreshPeriodUpdateLock;
@@ -255,6 +280,7 @@ class ICEPacketStream : public PacketStream {
     Mutex sendLock;
     uint8_t* rxRenderBuf;
     uint8_t* txRenderBuf;
+    qcc::Alarm timeoutAlarm;
 
     /**
      * Compose a STUN message with the passed in data.

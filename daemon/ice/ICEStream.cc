@@ -70,7 +70,9 @@ ICEStream::~ICEStream(void)
     // Empty componentList
     while (!componentList.empty()) {
         Component* component = componentList.back();
+        GetSession()->Unlock();
         delete component;
+        GetSession()->Lock();
         componentList.pop_back();
     }
 }
@@ -124,9 +126,17 @@ QStatus ICEStream::AddComponent(AddressFamily af, SocketType socketType,
 
     // must be first element 'inserted' into vector
     component = new Component(this, COMPONENT_ID_RTP, "RTP/AVP", af, STUNInfo, hmacKey, hmacKeyLen);
-    componentList.insert(componentList.end(), component);
+    componentList.push_back(component);
 
     return status;
+}
+
+void ICEStream::RemoveComponent(Component* component)
+{
+    iterator it = std::find(componentList.begin(), componentList.end(), component);
+    if (it != componentList.end()) {
+        componentList.erase(it);
+    }
 }
 
 

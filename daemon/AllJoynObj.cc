@@ -700,7 +700,7 @@ ThreadReturn STDCALL AllJoynObj::JoinSessionThread::RunJoin()
             MsgArg membersArg;
 
             /* Check for existing multipoint session */
-            if (vSessionEp) {
+            if (vSessionEp && optsIn.isMultipoint) {
                 vSessionEpName = vSessionEp->GetUniqueName();
                 SessionMapType::iterator it = ajObj.sessionMap.begin();
                 while (it != ajObj.sessionMap.end()) {
@@ -1661,10 +1661,12 @@ void AllJoynObj::RemoveSessionRefs(const String& vepName, const String& b2bEpNam
 
     if (!vep) {
         QCC_LogError(ER_FAIL, ("Virtual endpoint %s disappeared during RemoveSessionRefs", vepName.c_str()));
+        ReleaseLocks();
         return;
     }
     if (!b2bEp) {
         QCC_LogError(ER_FAIL, ("B2B endpoint %s disappeared during RemoveSessionRefs", b2bEpName.c_str()));
+        ReleaseLocks();
         return;
     }
 

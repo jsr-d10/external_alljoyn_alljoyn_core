@@ -63,7 +63,7 @@ namespace ajn {
 //     <ice_discovery_manager>
 //       <property interfaces="*"/>
 //       <property server="rdvs.alljoyn.org"/>
-//       <property protocol="HTTP"/>
+//       <property protocol="HTTPS"/>
 //       <property enable_ipv6=\"false\"/>"
 //     </ice_discovery_manager>
 //   </busconfig>
@@ -89,7 +89,7 @@ DiscoveryManager::DiscoveryManager(BusAttachment& bus)
     InterfaceFlags(NONE),
     Connection(NULL),
     ConnectionAuthenticationComplete(false),
-    iceCallback(0),
+    iceCallback(NULL),
     WakeEvent(),
     OnDemandResponseEvent(NULL),
     PersistentResponseEvent(NULL),
@@ -111,9 +111,7 @@ DiscoveryManager::DiscoveryManager(BusAttachment& bus)
     SentFirstGETMessage(false),
     userCredentials(),
     UseHTTP(false),
-    EnableIPv6(false),
-    ServerConnectThread(NULL),
-    ConnectEvent()
+    EnableIPv6(false)
 {
     QCC_DbgPrintf(("DiscoveryManager::DiscoveryManager()\n"));
 
@@ -127,7 +125,7 @@ DiscoveryManager::DiscoveryManager(BusAttachment& bus)
     //     <ice_discovery_manager>
     //       <property interfaces="*"/>
     //       <property server="rdvs.alljoyn.org"/>
-    //       <property protocol="HTTP"/>
+    //       <property protocol="HTTPS"/>
     //       <property enable_ipv6=\"false\"/>"
     //     </ice_discovery_manager>
     //   </busconfig>
@@ -199,6 +197,7 @@ DiscoveryManager::~DiscoveryManager()
     if (InterfaceUpdateAlarm) {
         DiscoveryManagerTimer.RemoveAlarm(*InterfaceUpdateAlarm);
         delete InterfaceUpdateAlarm;
+        InterfaceUpdateAlarm = NULL;
     }
 
     /* Stop the DiscoveryManagerTimer which is used to handle all the alarms */
@@ -242,8 +241,10 @@ DiscoveryManager::~DiscoveryManager()
     //
     // Delete any callbacks that a user of this class may have set.
     //
-    delete iceCallback;
-    iceCallback = 0;
+    if (iceCallback) {
+        delete iceCallback;
+        iceCallback = NULL;
+    }
 
     DiscoveryManagerState = IMPL_SHUTDOWN;
 }
@@ -334,7 +335,10 @@ void DiscoveryManager::SetCallback(Callback<void, CallbackType, const String&, c
     // Set the callback
     //
     DiscoveryManagerMutex.Lock(MUTEX_CONTEXT);
-    delete iceCallback;
+    if (iceCallback) {
+        delete iceCallback;
+        iceCallback = NULL;
+    }
     iceCallback = iceCb;
     DiscoveryManagerMutex.Unlock(MUTEX_CONTEXT);
 }
@@ -977,52 +981,8 @@ void* DiscoveryManager::Run(void* arg)
                      **/
                     DiscoveryManagerMutex.Unlock(MUTEX_CONTEXT);
 
-                    /* Kill the connect thread if it already running */
-                    if (ServerConnectThread) {
-                        ServerConnectThread->Kill();
-                        delete ServerConnectThread;
-                        ServerConnectThread = NULL;
-                    }
-
-                    /* Reset the ConnectEvent */
-                    ConnectEvent.ResetEvent();
-
-                    /* Initialize and start the connect thread */
-                    ServerConnectThread = new ConnectThread(this);
-
-                    if (ServerConnectThread) {
-                        status = ServerConnectThread->Start();
-
-                        if (status == ER_OK) {
-
-                            /* Wait on the ConnectEvent until RENDEZVOUS_SERVER_CONNECT_TIMEOUT_IN_MS */
-                            status = Event::Wait(ConnectEvent, RENDEZVOUS_SERVER_CONNECT_TIMEOUT_IN_MS);
-
-                            QCC_DbgPrintf(("%s: Wait on connect status = %s", __FUNCTION__, QCC_StatusText(status)));
-
-                            /* Retrieve the status of the connect */
-                            if (ServerConnectThread) {
-                                status = ServerConnectThread->GetStatus();
-                            } else {
-                                status = ER_FAIL;
-                            }
-
-                            QCC_DbgPrintf(("%s: Server connect thread return status = %s", __FUNCTION__, QCC_StatusText(status)));
-
-                            /* Clean up the connect thread */
-                            if (ServerConnectThread) {
-                                ServerConnectThread->Kill();
-                                delete ServerConnectThread;
-                                ServerConnectThread = NULL;
-                            }
-
-                        } else {
-                            QCC_LogError(status, ("%s: Unable to start the ServerConnectThread", __FUNCTION__));
-                        }
-                    } else {
-                        status = ER_FAIL;
-                        QCC_LogError(status, ("%s: Unable to initialize the ServerConnectThread", __FUNCTION__));
-                    }
+                    status = Connect();
+                    QCC_DbgPrintf(("%s: Server connect return status = %s", __FUNCTION__, QCC_StatusText(status)));
 
                     DiscoveryManagerMutex.Lock(MUTEX_CONTEXT);
 
@@ -1153,6 +1113,7 @@ void* DiscoveryManager::Run(void* arg)
                     if (InterfaceUpdateAlarm) {
                         DiscoveryManagerTimer.RemoveAlarm(*InterfaceUpdateAlarm);
                         delete InterfaceUpdateAlarm;
+                        InterfaceUpdateAlarm = NULL;
                     }
 
                     InterfaceUpdateAlarm = new Alarm(INTERFACE_UPDATE_MIN_INTERVAL, this, 0, NULL);
@@ -1182,7 +1143,9 @@ void* DiscoveryManager::Run(void* arg)
                         if ((PeerID.empty()) || (ClientAuthenticationRequiredFlag)) {
 
                             if (LastOnDemandMessageSent.messageType != CLIENT_LOGIN) {
+                                DiscoveryManagerMutex.Unlock(MUTEX_CONTEXT);
                                 status = SendClientLoginFirstRequest();
+                                DiscoveryManagerMutex.Lock(MUTEX_CONTEXT);
 
                                 if (status != ER_OK) {
 
@@ -2068,6 +2031,8 @@ QStatus DiscoveryManager::HandleAddressCandidatesResponse(AddressCandidatesRespo
             QCC_DbgPrintf(("DiscoveryManager::HandleAddressCandidatesResponse(): Invoking the AllocateICESession callback\n"));
             (*iceCallback)(ALLOCATE_ICE_SESSION, response.peerAddr, &wkn, 0xFF);
         }
+
+        invokedAllocateICESession = true;
     }
 
     if ((!invokedAllocateICESession) && (!invokedStartICEChecks)) {
@@ -2090,7 +2055,7 @@ QStatus DiscoveryManager::HandlePersistentMessageResponse(Json::Value payload)
     // If there is no callback, we can't tell the user anything about what is
     // going on, so it's pointless to go any further.
     //
-    if (iceCallback == 0) {
+    if (!iceCallback) {
         QCC_DbgPrintf(("DiscoveryManager::HandlePersistentMessageResponse(): No callback, so nothing to do\n"));
 
         // We return an ER_OK because this is not an error caused by the received response
@@ -2280,6 +2245,7 @@ void DiscoveryManager::HandlePersistentConnectionResponse(HttpConnection::HTTPRe
         if (InterfaceUpdateAlarm) {
             DiscoveryManagerTimer.RemoveAlarm(*InterfaceUpdateAlarm);
             delete InterfaceUpdateAlarm;
+            InterfaceUpdateAlarm = NULL;
         }
 
         InterfaceUpdateAlarm = new Alarm(INTERFACE_UPDATE_MIN_INTERVAL, this, 0, NULL);
@@ -2642,6 +2608,7 @@ void DiscoveryManager::HandleOnDemandConnectionResponse(HttpConnection::HTTPResp
             if (InterfaceUpdateAlarm) {
                 DiscoveryManagerTimer.RemoveAlarm(*InterfaceUpdateAlarm);
                 delete InterfaceUpdateAlarm;
+                InterfaceUpdateAlarm = NULL;
             }
 
             InterfaceUpdateAlarm = new Alarm(INTERFACE_UPDATE_MIN_INTERVAL, this, 0, NULL);
@@ -2666,6 +2633,7 @@ void DiscoveryManager::HandleOnDemandConnectionResponse(HttpConnection::HTTPResp
         if (InterfaceUpdateAlarm) {
             DiscoveryManagerTimer.RemoveAlarm(*InterfaceUpdateAlarm);
             delete InterfaceUpdateAlarm;
+            InterfaceUpdateAlarm = NULL;
         }
 
         InterfaceUpdateAlarm = new Alarm(INTERFACE_UPDATE_MIN_INTERVAL, this, 0, NULL);
@@ -3358,41 +3326,10 @@ void DiscoveryManager::ComposeAndQueueTokenRefreshMessage(TokenRefreshMessage re
     DiscoveryManagerMutex.Unlock(MUTEX_CONTEXT);
 }
 
-ThreadReturn STDCALL DiscoveryManager::ConnectThread::Run(void* arg)
-{
-    QCC_DbgHLPrintf(("DiscoveryManager::ConnectThread::Run()"));
-
-    QStatus localStatus = ER_FAIL;
-
-    if (discoveryManager) {
-        localStatus = discoveryManager->Connect();
-    }
-
-    status = localStatus;
-
-    /* Tell the DiscoveryManager Run() thread that we are done */
-    (discoveryManager->ConnectEvent).SetEvent();
-
-    return 0;
-}
-
-QStatus STDCALL DiscoveryManager::ConnectThread::GetStatus(void)
-{
-    QCC_DbgHLPrintf(("DiscoveryManager::ConnectThread::GetStatus()"));
-
-    return status;
-}
-
 QStatus DiscoveryManager::Stop(void)
 {
 
     QCC_DbgHLPrintf(("DiscoveryManager::Stop()"));
-    /* Set the ConnectEvent to make the Run() thread come out of the wait on ConnectEvent.
-     * We should not kill the ServerConnectThread here because during joining, if the Run
-     * thread was waiting on ConnectEvent, it might want to read the status from the
-     * ServerConnectThread object. The Run() function itself will take care of killing this
-     * thread after reading this status. */
-    ConnectEvent.SetEvent();
 
     /*
      * Tell the Run() thread to shut down through the thread

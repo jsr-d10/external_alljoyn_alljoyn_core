@@ -92,6 +92,10 @@ void ProximityScanner::Scan(bool request_scan) {
 
     bool hasOwer;
 
+    uint32_t starttime = GetTimestamp();
+
+
+
     while (true) {
         status = bus.NameHasOwner("org.alljoyn.proximity.proximityservice", hasOwer);
         if (ER_OK != status) {
@@ -120,11 +124,13 @@ void ProximityScanner::Scan(bool request_scan) {
     }
 
 
+
     // Call the remote method SCAN on the service
 
     // Why do change request_scan here ? This handles the situation where the service was killed by the OS and
     // we are not able to get the scan results
 
+    QCC_DbgPrintf(("===============Time before Scan ================== %d", starttime));
     Message reply(bus);
     MsgArg arg;
     arg.Set("b", request_scan);
@@ -151,6 +157,9 @@ void ProximityScanner::Scan(bool request_scan) {
     MsgArg*scanArray;
     size_t scanArraySize;
     const MsgArg*args = reply->GetArg(0);
+    if (args == NULL) {
+        return;
+    }
     status = args->Get("a(ssb)", &scanArraySize, &scanArray);
     if (ER_OK != status) {
         QCC_LogError(status, ("Error while unmarshalling the array of structs recevied from the service"));
@@ -189,6 +198,9 @@ void ProximityScanner::Scan(bool request_scan) {
         // We do not have any scan results returned by the Android service ??
         QCC_DbgPrintf(("No Scan results were returned by the service. Either Wifi is turned off or there are no APs around"));
     }
+
+
+    QCC_DbgPrintf(("================ Time after Scan processing ============  %d", GetTimestamp() - starttime));
 }
 
 }

@@ -68,6 +68,13 @@ const uint32_t ICE_ALLOCATE_SESSION_WAIT_TIMEOUT = 15000;
 // PPN - Need to review this time
 const uint32_t ICE_REFRESH_TOKENS_WAIT_TIMEOUT = 15000;
 
+/* Assuming that the MTU size of the interface is 1500 bytes, the total STUN overhead when sending
+ * data through the relay is 172 bytes/packet. Hence the max MTU for data would be 1328 bytes.
+ * This needs to be hard-coded here because PacketEngine does not allow us to set the MTU per
+ * packet stream instead it needs to know the max value when it is started so that it may allocate
+ * packet pools appropriately.*/
+const uint32_t MAX_ICE_MTU = 1328;
+
 namespace ajn {
 
 class DaemonICEEndpoint;
@@ -406,11 +413,20 @@ class DaemonICETransport : public Transport, public RemoteEndpoint::EndpointList
 
     struct AlarmContext {
 
-        AlarmContext(DaemonICEEndpoint* iceendpoint) : endpoint(iceendpoint) { }
+        enum ContextType {
+            CONTEXT_NAT_KEEPALIVE,
+            CONTEXT_SCHEDULE_RUN
+        };
+
+        AlarmContext() : contextType(CONTEXT_SCHEDULE_RUN) { }
+
+        AlarmContext(ICEPacketStream* stream) : contextType(CONTEXT_NAT_KEEPALIVE), pktStream(stream) { }
 
         virtual ~AlarmContext() { }
 
-        DaemonICEEndpoint* endpoint;
+        ContextType contextType;
+
+        ICEPacketStream* pktStream;
     };
 
     /**
@@ -484,8 +500,12 @@ class DaemonICETransport : public Transport, public RemoteEndpoint::EndpointList
     class AllocateICESessionThread : public Thread, public ThreadListener {
       public:
         AllocateICESessionThread(DaemonICETransport* transportObj, String clientGUID)
-            : Thread("AllocateICESessionThread"), transportObj(transportObj), clientGUID(clientGUID) { }
+            : Thread("AllocateICESessionThread"), transportObj(transportObj), clientGUID(clientGUID), pktStream(NULL) { }
 
+        /* Virtual destructor is needed to ensure that base class destructors get run */
+        virtual ~AllocateICESessionThread() { }
+
+        /* Called when thread instance exits */
         void ThreadExit(Thread* thread);
 
       protected:
@@ -494,6 +514,7 @@ class DaemonICETransport : public Transport, public RemoteEndpoint::EndpointList
       private:
         DaemonICETransport* transportObj;
         String clientGUID;
+        ICEPacketStream* pktStream;
     };
 
     std::vector<AllocateICESessionThread*> allocateICESessionThreads;  /**< List of outstanding AllocateICESession requests */
@@ -627,6 +648,12 @@ class DaemonICETransport : public Transport, public RemoteEndpoint::EndpointList
      * attacks from "abroad" and trust ourselves implicitly.
      */
     static const uint32_t ALLJOYN_MAX_COMPLETED_CONNECTIONS_ICE_DEFAULT = 50;
+
+    /**
+     * @brief The scheduling interval for the DaemonICETransport::Run thread.
+     */
+    // TODO: PPN - May need to tweak this value
+    static const uint32_t DAEMON_ICE_TRANSPORT_RUN_SCHEDULING_INTERVAL = 5000;
 
     /* Timer used to handle the alarms */
     Timer daemonICETransportTimer;

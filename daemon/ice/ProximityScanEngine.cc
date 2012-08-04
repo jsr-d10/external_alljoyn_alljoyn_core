@@ -110,7 +110,9 @@ ProximityScanEngine::ProximityScanEngine(DiscoveryManager*dm) : bus(dm->bus) {
     QCC_DbgTrace(("ProximityScanEngine::ProximityScanEngine() called"));
     tadd_count = 1;
     wifiapDroppped = false;
-    wifiapAdded = false;
+    //wifiapAdded = false;
+    wifiON = false;
+    //request_scan = false;
     request_scan = true;
     no_scan_results_count = 0;
     discoveryManager = dm;
@@ -176,7 +178,8 @@ void ProximityScanEngine::ProcessScanResults() {
 
     if (proximityScanner->scanResults.size() > 0) {
         QCC_DbgPrintf(("Scan returned results so APs were added to the final Map"));
-        wifiapAdded = true;
+        //wifiapAdded = true;
+        wifiON = true;
     }
     QCC_DbgPrintf(("Printing Maps after incrementing counts in Hysteresis Map"));
     PrintHysteresis();
@@ -221,7 +224,7 @@ void ProximityScanEngine::ProcessScanResults() {
     //		all entries in the hysteresis with count > 0 make it to final
     //          Update final map .. Indicate with a boolean that there has been a change in the final map
 
-    if ((tadd_count == TADD_COUNT && wifiapAdded) || wifiapDroppped || request_scan) {
+    if ((tadd_count == TADD_COUNT && wifiON) || wifiapDroppped || request_scan) {
         // Form the proximity message if needed by checking for the boolean set in the above two cases
         // and Queue it if there is a change
 
@@ -238,7 +241,8 @@ void ProximityScanEngine::ProcessScanResults() {
         discoveryManager->QueueProximityMessage(proximityMsg, bssids, macIds);
 
         wifiapDroppped = false;
-        wifiapAdded = false;
+        //wifiapAdded = false;
+        wifiON = true;
         tadd_count = 0;
     } else {
         tadd_count++;
@@ -253,7 +257,7 @@ void ProximityScanEngine::ProcessScanResults() {
     //    request a scan once in 120 secs apart from what the device is already doing
     //
 
-    if (proximityScanner->scanResults.size() == 0) {
+    if (proximityScanner->scanResults.size() <= 1) {
         no_scan_results_count++;
     } else {
         no_scan_results_count = 0;
@@ -419,9 +423,10 @@ void ProximityScanEngine::StopScan() {
     mainTimer.Join();
     hysteresisMap.clear();
     finalMap.clear();
-//  isFirstScanComplete = false;
+    //isFirstScanComplete = false;
     wifiapDroppped = false;
-    wifiapAdded = false;
+    //wifiapAdded = false;
+    wifiON = false;
     request_scan = true;
     no_scan_results_count = 0;
     QCC_DbgPrintf(("ProximityScanEngine::StopScan() completed"));
@@ -432,7 +437,7 @@ void ProximityScanEngine::StartScan() {
 
     QCC_DbgTrace(("ProximityScanEngine::StartScan() called"));
 
-    request_scan = true;
+    //request_scan = true;
 
     map<qcc::String, qcc::String>::iterator it;
 
