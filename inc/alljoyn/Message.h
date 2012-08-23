@@ -506,6 +506,13 @@ class _Message {
         }
     }
 
+    /**
+     * Copy constructor.
+     *
+     * @param other   The other message to copy.
+     */
+    _Message(const _Message& other);
+
   protected:
 
     /*
@@ -580,7 +587,6 @@ class _Message {
      * @param objPath     The object the method call is being sent to
      * @param iface       The interface for the method (can be NULL)
      * @param methodName  The name of the method to call
-     * @param serial      Returns the serial number for this method call
      * @param args        The method call argument list (can be NULL)
      * @param numArgs     The number of arguments
      * @param flags       A logical OR of the AllJoyn flags
@@ -594,7 +600,6 @@ class _Message {
                     const qcc::String& objPath,
                     const qcc::String& iface,
                     const qcc::String& methodName,
-                    uint32_t& serial,
                     const MsgArg* args,
                     size_t numArgs,
                     uint8_t flags);
@@ -673,16 +678,24 @@ class _Message {
 
     /**
      * @internal
+     * Marshal the message again with the new sender name if one was provided.
+     *
+     * @param senderName  Option sender name to replace the current sender name in the message.
+     * @return
+     *      - #ER_OK if successful
+     *      - An error status otherwise
      */
-    QStatus ReMarshal(const char* senderName, bool newSerial = false);
-
-    /// @endcond
-  private:
+    QStatus ReMarshal(const char* senderName = NULL);
 
     /**
-     * Copy constructor is disallowed.
+     * @internal
+     * Sets the serial number to the next available value for the bus attachment for this message.
      */
-    _Message(const _Message& other);
+    void SetSerialNumber();
+
+    /// @endcond
+
+  private:
 
     /**
      * Message assignment is disallowed.
@@ -719,13 +732,12 @@ class _Message {
      *
      * @param      isBusToBus   true iff connection attempt is between two AllJoyn instances (bus joining).
      * @param      allowRemote  true iff connection allows messages from remote devices.
-     * @param[out] serial  Returns the serial number for this method call
      *
      * @return
      *      - #ER_OK if hello method call was sent successfully.
      *      - An error status otherwise
      */
-    QStatus HelloMessage(bool isBusToBus, bool allowRemote, uint32_t& serial);
+    QStatus HelloMessage(bool isBusToBus, bool allowRemote);
 
     /**
      * Compose the reply to the hello method call
@@ -786,7 +798,6 @@ class _Message {
     qcc::SocketFd* handles;      ///< Array of file/socket descriptors.
     size_t numHandles;           ///< Number of handles in the handles array
     bool encrypt;                ///< True if the message is to be encrypted
-    volatile int32_t busy;       ///< Non-zero while the message is being modified
 
     /**
      * The header fields for this message. Which header fields are present depends on the message

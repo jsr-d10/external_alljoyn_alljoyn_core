@@ -5,7 +5,7 @@
  */
 
 /******************************************************************************
- * Copyright 2009-2011, Qualcomm Innovation Center, Inc.
+ * Copyright 2009-2012, Qualcomm Innovation Center, Inc.
  *
  *    Licensed under the Apache License, Version 2.0 (the "License");
  *    you may not use this file except in compliance with the License.
@@ -41,13 +41,6 @@ using namespace qcc;
 
 namespace ajn {
 
-void ClientRouter::AlarmTriggered(const qcc::Alarm& alarm, QStatus reason)
-{
-    if (localEndpoint && nonLocalEndpoint) {
-        localEndpoint->BusIsConnected();
-    }
-}
-
 QStatus ClientRouter::PushMessage(Message& msg, BusEndpoint& sender)
 {
     QStatus status = ER_OK;
@@ -56,6 +49,7 @@ QStatus ClientRouter::PushMessage(Message& msg, BusEndpoint& sender)
         status = ER_BUS_NO_ENDPOINT;
     } else {
         if (&sender == localEndpoint) {
+            localEndpoint->UpdateSerialNumber(msg);
             status = nonLocalEndpoint->PushMessage(msg);
         } else {
             status = localEndpoint->PushMessage(msg);
@@ -86,10 +80,9 @@ QStatus ClientRouter::RegisterEndpoint(BusEndpoint& endpoint, bool isLocal)
         localEndpoint->SetUniqueName(nonLocalEndpoint->GetUniqueName());
     }
 
-    /* Notify local endpoint via an alarm if we have both a local and at least one non-local endpoint */
+    /* Notify local endpoint we have both a local and at least one non-local endpoint */
     if (localEndpoint && nonLocalEndpoint && (isLocal || !hadNonLocal)) {
-        Alarm connectAlarm(0, this, 0, NULL);
-        localEndpoint->GetBus().GetInternal().GetTimer().AddAlarm(connectAlarm);
+        localEndpoint->OnBusConnected();
     }
     return ER_OK;
 }
@@ -99,12 +92,11 @@ void ClientRouter::UnregisterEndpoint(BusEndpoint& endpoint)
     QCC_DbgHLPrintf(("ClientRouter::UnregisterEndpoint"));
 
     /* Unregister static endpoints */
-    if (&endpoint == localEndpoint) {
+    if (&endpoint != localEndpoint) {
         /*
          * Let the bus know that the local endpoint disconnected
          */
         localEndpoint->GetBus().GetInternal().LocalEndpointDisconnected();
-        localEndpoint = NULL;
     } else if (&endpoint == nonLocalEndpoint) {
         nonLocalEndpoint = NULL;
     }

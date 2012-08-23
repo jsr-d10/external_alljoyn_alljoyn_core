@@ -24,8 +24,10 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <bthsdpdef.h>
+#pragma warning( push )
+#pragma warning( disable : 4068)
 #include <BluetoothAPIs.h>
-
+#pragma warning( pop )
 #include <qcc/SocketStream.h>
 #include <qcc/String.h>
 #include <qcc/StringSource.h>
@@ -1746,7 +1748,7 @@ void BTTransport::BTAccessor::AlarmTriggered(const Alarm& alarm, QStatus reason)
 {
     QCC_DbgTrace(("BTTransport::BTAccessor::AlarmTriggered()"));
 
-    DispatchInfo* op = static_cast<DispatchInfo*>(alarm.GetContext());
+    DispatchInfo* op = static_cast<DispatchInfo*>(alarm->GetContext());
 
     if (reason == ER_OK) {
         switch (op->operation) {

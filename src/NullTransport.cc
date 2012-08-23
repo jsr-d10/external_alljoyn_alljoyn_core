@@ -56,6 +56,8 @@ DaemonLauncher* NullTransport::daemonLauncher;
  */
 class NullEndpoint : public BusEndpoint {
 
+    friend class NullTransport;
+
   public:
 
     NullEndpoint(BusAttachment& clientBus, BusAttachment& daemonBus);
@@ -64,6 +66,12 @@ class NullEndpoint : public BusEndpoint {
 
     QStatus PushMessage(Message& msg)
     {
+        if (closing) {
+            return ER_BUS_ENDPOINT_CLOSING;
+        }
+
+        IncrementPushCount();
+
         QStatus status = ER_OK;
         /*
          * In the un-bundled daemon case messages store the name of the endpoint they were received
@@ -79,7 +87,10 @@ class NullEndpoint : public BusEndpoint {
          */
         if (msg->bus == &clientBus) {
             /*
-             * Messages we are sending to the daemon may need to be encrypted.
+             * In the non-bundled case messages are encrypted when they are delivered to the daemon
+             * endpoint by a call to Message::Deliver. The null transport bypasses Message::Deliver
+             * by pushing the messages directly to the daemon router. This means we need to encrypt
+             * messages here before we do the push.
              */
             if (msg->encrypt) {
                 status = msg->EncryptMessage();
@@ -95,6 +106,7 @@ class NullEndpoint : public BusEndpoint {
                 status = ER_OK;
             }
         } else {
+            assert(msg->bus == &daemonBus);
             /*
              * Register the endpoint with the client on receiving the first message from the daemon.
              */
@@ -104,9 +116,20 @@ class NullEndpoint : public BusEndpoint {
             } else {
                 DecrementAndFetch(&clientReady);
             }
-            msg->bus = &clientBus;
-            status = clientBus.GetInternal().GetRouter().PushMessage(msg, *this);
+            /*
+             * We need to clone broadcast signals because each receiving bus attachment must be
+             * able to unmarshal the arg list including decrypting and doing header expansion.
+             */
+            if (msg->IsBroadcastSignal()) {
+                Message clone(msg, true /*deep copy*/);
+                clone->bus = &clientBus;
+                status = clientBus.GetInternal().GetRouter().PushMessage(clone, *this);
+            } else {
+                msg->bus = &clientBus;
+                status = clientBus.GetInternal().GetRouter().PushMessage(msg, *this);
+            }
         }
+        DecrementPushCount();
         return status;
     }
 
@@ -116,15 +139,17 @@ class NullEndpoint : public BusEndpoint {
     uint32_t GetGroupId() const { return qcc::GetGid(); }
     uint32_t GetProcessId() const { return qcc::GetPid(); }
     bool SupportsUnixIDs() const {
-#if defined(QCC_OS_WINDOWS)
+#if defined(QCC_OS_GROUP_WINDOWS) || defined(QCC_OS_GROUP_WINRT)
         return false;
 #else
         return true;
 #endif
     }
+
     bool AllowRemoteMessages() { return true; }
 
     int32_t clientReady;
+    bool closing;
     BusAttachment& clientBus;
     BusAttachment& daemonBus;
 
@@ -135,6 +160,7 @@ class NullEndpoint : public BusEndpoint {
 NullEndpoint::NullEndpoint(BusAttachment& clientBus, BusAttachment& daemonBus) :
     BusEndpoint(ENDPOINT_TYPE_NULL),
     clientReady(0),
+    closing(false),
     clientBus(clientBus),
     daemonBus(daemonBus)
 {
@@ -149,8 +175,11 @@ NullEndpoint::NullEndpoint(BusAttachment& clientBus, BusAttachment& daemonBus) :
 NullEndpoint::~NullEndpoint()
 {
     QCC_DbgHLPrintf(("Destroying null endpoint %s", uniqueName.c_str()));
-    clientBus.GetInternal().GetRouter().UnregisterEndpoint(*this);
-    daemonBus.GetInternal().GetRouter().UnregisterEndpoint(*this);
+
+    /*
+     * Don't finalize the destructor while there are threads pushing to this endpoint.
+     */
+    WaitForZeroPushCount();
 }
 
 NullTransport::NullTransport(BusAttachment& bus) : bus(bus), running(false), endpoint(NULL), daemonBus(NULL)
@@ -194,23 +223,23 @@ QStatus NullTransport::LinkBus(BusAttachment* otherBus)
 {
     QCC_DbgHLPrintf(("Linking client and daemon busses"));
 
-    daemonBus = otherBus;
-    endpoint = new NullEndpoint(bus, *daemonBus);
+    assert(otherBus);
+
+    endpoint = new NullEndpoint(bus, *otherBus);
     /*
      * The compression rules are shared between the client bus and the daemon bus
      */
-    bus.GetInternal().OverrideCompressionRules(daemonBus->GetInternal().GetCompressionRules());
+    bus.GetInternal().OverrideCompressionRules(otherBus->GetInternal().GetCompressionRules());
     /*
      * Register the null endpoint with the daemon router. The client is registered as soon as we
      * receive a message from the daemon. This will happen as soon as the daemon has completed
      * the registration.
      */
     QCC_DbgHLPrintf(("Registering null endpoint with daemon"));
-    QStatus status = daemonBus->GetInternal().GetRouter().RegisterEndpoint(*endpoint, false);
+    QStatus status = otherBus->GetInternal().GetRouter().RegisterEndpoint(*endpoint, false);
     if (status != ER_OK) {
         delete endpoint;
         endpoint = NULL;
-        daemonBus = NULL;
     }
     return status;
 }
@@ -225,13 +254,13 @@ QStatus NullTransport::Connect(const char* connectSpec, const SessionOpts& opts,
     if (!daemonLauncher) {
         return ER_BUS_TRANSPORT_NOT_AVAILABLE;
     }
-    if (!daemonBus) {
-        status = daemonLauncher->Start(this);
-        if (status == ER_OK) {
-            assert(endpoint);
-            if (newep) {
-                *newep = endpoint;
-            }
+    assert(!endpoint);
+
+    status = daemonLauncher->Start(this);
+    if (status == ER_OK) {
+        assert(endpoint);
+        if (newep) {
+            *newep = endpoint;
         }
     }
     return status;
@@ -239,12 +268,15 @@ QStatus NullTransport::Connect(const char* connectSpec, const SessionOpts& opts,
 
 QStatus NullTransport::Disconnect(const char* connectSpec)
 {
-    delete endpoint;
-    endpoint = NULL;
-    if (daemonBus) {
+    NullEndpoint* ep = reinterpret_cast<NullEndpoint*>(endpoint);
+    if (ep) {
         assert(daemonLauncher);
-        daemonLauncher->Stop();
-        daemonBus = NULL;
+        endpoint = NULL;
+        ep->closing = true;
+        ep->clientBus.GetInternal().GetRouter().UnregisterEndpoint(*ep);
+        ep->daemonBus.GetInternal().GetRouter().UnregisterEndpoint(*ep);
+        daemonLauncher->Stop(this);
+        delete ep;
     }
     return ER_OK;
 }

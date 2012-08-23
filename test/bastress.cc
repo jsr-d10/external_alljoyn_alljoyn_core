@@ -47,7 +47,7 @@ using namespace std;
 using namespace qcc;
 using namespace ajn;
 
-static int count = 0;
+static bool noDestruct = false;
 
 class ThreadClass : public Thread {
 
@@ -82,9 +82,9 @@ class ThreadClass : public Thread {
         b1->RegisterBusObject(bo);
         b1->UnregisterBusObject(bo);
 
-
-        delete b1;
-        b1 = NULL;
+        if (!noDestruct) {
+            delete b1;
+        }
 
         return this;
     }
@@ -94,31 +94,86 @@ class ThreadClass : public Thread {
 
 };
 
+static void usage(void)
+{
+    printf("Usage: bastress [-s] [-i <iterations>] [-t <threads>]\n\n");
+    printf("Options:\n");
+    printf("   -h                    = Print this help message\n");
+    printf("   -i                    = Number of iterations, default is 1000\n");
+    printf("   -t                    = Number of threads, default is 5\n");
+    printf("   -s                    = Stop the threads before joining them\n");
+    printf("   -d                    = Don't delete the bus attachments - implies \"-i 1\"r\n");
+}
 
 /** Main entry point */
 int main(int argc, char**argv)
 {
     QStatus status = ER_OK;
-    static int count = 0;
+    uint32_t iterations = 1000;
+    uint32_t threads = 5;
+    bool stop = false;
 
-    while (1) {
+    /* Parse command line args */
+    for (int i = 1; i < argc; ++i) {
+        if (0 == strcmp("-i", argv[i])) {
+            ++i;
+            if (i == argc) {
+                printf("option %s requires a parameter\n", argv[i - 1]);
+                usage();
+                exit(1);
+            } else {
+                iterations = strtoul(argv[i], NULL, 10);
+            }
+        } else if (0 == strcmp("-t", argv[i])) {
+            ++i;
+            if (i == argc) {
+                printf("option %s requires a parameter\n", argv[i - 1]);
+                usage();
+                exit(1);
+            } else {
+                threads = strtoul(argv[i], NULL, 10);
+            }
+        } else if (0 == strcmp("-d", argv[i])) {
+            noDestruct = true;
+        } else if (0 == strcmp("-s", argv[i])) {
+            stop = true;
+        } else {
+            usage();
+            exit(1);
+        }
+    }
 
-        ThreadClass*t[THREAD_COUNT];;
+    if (noDestruct) {
+        iterations = 1;
+    }
+
+    ThreadClass** threadList = new ThreadClass *[threads];
+
+    while (iterations--) {
 
         QCC_SyncPrintf("Starting threads... \n");
-        for (int i = 0; i < THREAD_COUNT; i++) {
+        for (unsigned int i = 0; i < threads; i++) {
             char buf[256];
-            sprintf(buf, "Thread.n%d", count);
-            count++;
-            t[i] = new ThreadClass((char*)buf);
-            t[i]->Start();
+            sprintf(buf, "Thread.n%d", i);
+            threadList[i] = new ThreadClass((char*)buf);
+            threadList[i]->Start();
         }
 
+        if (stop) {
+            /*
+             * Sleep a random time before stopping of bus attachments is tested at different states of up and running
+             */
+            qcc::Sleep(32 * (qcc::Rand8() / 8));
+            QCC_SyncPrintf("stopping threads... \n");
+            for (unsigned int i = 0; i < threads; i++) {
+                threadList[i]->Stop();
+            }
+        }
 
         QCC_SyncPrintf("deleting threads... \n");
-        for (int i = 0; i < THREAD_COUNT; i++) {
-            t[i]->Join();
-            delete t[i];
+        for (unsigned int i = 0; i < threads; i++) {
+            threadList[i]->Join();
+            delete threadList[i];
         }
 
     }

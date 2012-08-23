@@ -22,12 +22,10 @@
  ******************************************************************************/
 
 #include <qcc/platform.h>
-
 #include <qcc/String.h>
-
+#include <alljoyn/DBusStd.h>
 #include <alljoyn/Message.h>
 #include <Status.h>
-
 /// @cond ALLJOYN_DEV
 /*!
    \def QCC_MODULE
@@ -78,6 +76,8 @@ class InterfaceDescription {
 
   public:
 
+    class AnnotationsMap; /**< A map to store string annotations */
+
     /**
      * Structure representing the member to be added to the Interface
      */
@@ -88,30 +88,27 @@ class InterfaceDescription {
         qcc::String signature;               /**< Method call IN arguments (NULL for signals) */
         qcc::String returnSignature;         /**< Signal or method call OUT arguments */
         qcc::String argNames;                /**< Comma separated list of argument names - can be NULL */
-        uint8_t annotation;                  /**< Exclusive OR of flags MEMBER_ANNOTATE_NO_REPLY and MEMBER_ANNOTATE_DEPRECATED */
+        qcc::ManagedObj<AnnotationsMap> annotations;           /**< Map of annotations */
         qcc::String accessPerms;              /**< Required permissions to invoke this call */
 
         /** %Member constructor */
         Member(const InterfaceDescription* iface, AllJoynMessageType type, const char* name,
-               const char* signature, const char* returnSignature, const char* argNames, uint8_t annotation, const char* accessPerms)
-            : iface(iface),
-            memberType(type),
-            name(name),
-            signature(signature ? signature : ""),
-            returnSignature(returnSignature ? returnSignature : ""),
-            argNames(argNames ? argNames : ""),
-            annotation(annotation),
-            accessPerms(accessPerms ? accessPerms : "") { }
+               const char* signature, const char* returnSignature, const char* argNames, uint8_t annotation, const char* accessPerms);
+
+        /**
+         * Check if this member has a given annotation with a given value
+         * @param name   Name of the annotation to look for
+         * @param value  Value to compare with
+         * @return    true iff annotations[name] == value
+         */
+        bool GetAnnotation(const qcc::String& name, qcc::String& value) const;
 
         /**
          * Equality. Two members are defined to be equal if their members are equal except for iface which is ignored for equality.
          * @param o   Member to compare against this member.
          * @return    true iff o == this member.
          */
-        bool operator==(const Member& o) const {
-            return ((memberType == o.memberType) && (name == o.name) && (signature == o.signature)
-                    && (returnSignature == o.returnSignature) && (annotation == o.annotation));
-        }
+        bool operator==(const Member& o) const;
     };
 
     /**
@@ -121,15 +118,13 @@ class InterfaceDescription {
         qcc::String name;              /**< %Property name */
         qcc::String signature;         /**< %Property type */
         uint8_t access;                /**< Access is #PROP_ACCESS_READ, #PROP_ACCESS_WRITE, or #PROP_ACCESS_RW */
+        qcc::ManagedObj<AnnotationsMap> annotations;    /**< Map of annotations */
 
         /** Property constructor */
-        Property(const char* name, const char* signature, uint8_t access)
-            : name(name), signature(signature ? signature : ""), access(access) { }
+        Property(const char* name, const char* signature, uint8_t access);
 
         /** Equality */
-        bool operator==(const Property& o) const {
-            return ((name == o.name) && (signature == o.signature) && (access == o.access));
-        }
+        bool operator==(const Property& o) const;
     };
 
     /**
@@ -204,6 +199,32 @@ class InterfaceDescription {
     {
         return AddMember(MESSAGE_METHOD_CALL, name, inputSig, outSig, argNames, annotation, accessPerms);
     }
+
+    /**
+     * Add an annotation to an existing member (signal or method).
+     *
+     * @param member     Name of member
+     * @param name       Name of annotation
+     * @param value      Value for the annotation
+     *
+     * @return
+     *      - #ER_OK if successful
+     *      - #ER_BUS_MEMBER_ALREADY_EXISTS if member already exists
+     */
+    QStatus AddMemberAnnotation(const char* member, const qcc::String& name, const qcc::String& value);
+
+    /**
+     * Get annotation to an existing member (signal or method).
+     *
+     * @param member     Name of member
+     * @param name       Name of annotation
+     * @param value      Output value for the annotation
+     *
+     * @return
+     *      - true if found
+     *      - false if property not found
+     */
+    bool GetMemberAnnotation(const char* member, const qcc::String& name, qcc::String& value) const;
 
     /**
      * Lookup a member method description by name
@@ -287,6 +308,26 @@ class InterfaceDescription {
     QStatus AddProperty(const char* name, const char* signature, uint8_t access);
 
     /**
+     * Add an annotation to an existing property
+     * @param p_name     Name of the property
+     * @param name       Name of annotation
+     * @param value      Value for the annotation
+     * @return
+     *      - #ER_OK if successful.
+     *      - #ER_BUS_PROPERTY_ALREADY_EXISTS if the annotation can not be added to the property because it already exists.
+     */
+    QStatus AddPropertyAnnotation(const qcc::String& p_name, const qcc::String& name, const qcc::String& value);
+
+    /**
+     * Get the annotation value for a property
+     * @param p_name     Name of the property
+     * @param name       Name of annotation
+     * @param value      Value for the annotation
+     * @return           true if found, false if not found
+     */
+    bool GetPropertyAnnotation(const qcc::String& p_name, const qcc::String& name, qcc::String& value) const;
+
+    /**
      * Check for existence of a property.
      *
      * @param name       Name of the property to lookup
@@ -309,6 +350,30 @@ class InterfaceDescription {
     const char* GetName() const { return name.c_str(); }
 
     /**
+     * Add an annotation to the interface.
+     *
+     * @param name       Name of annotation.
+     * @param value      Value of the annotation
+     * @return
+     *      - #ER_OK if successful.
+     *      - #ER_BUS_PROPERTY_ALREADY_EXISTS if the property can not be added
+     *                                        because it already exists.
+     */
+    QStatus AddAnnotation(const qcc::String& name, const qcc::String& value);
+
+    /**
+     * Get the value of an annotation
+     *
+     * @param name       Name of annotation.
+     * @param value      Returned value of the annotation
+     * @return
+     *      - true if annotation found.
+     *      - false if annotation not found
+     */
+    bool GetAnnotation(const qcc::String& name, qcc::String& value) const;
+
+
+    /**
      * Returns a description of the interface in introspection XML format
      * @return The interface description in introspection XML format.
      *
@@ -329,7 +394,7 @@ class InterfaceDescription {
      * interfaces are encrypted.
      * @return true if the interface is secure.
      */
-    bool IsSecure() const { return secure; }
+    bool IsSecure() const;
 
     /**
      * Equality operation.
@@ -375,7 +440,6 @@ class InterfaceDescription {
 
     qcc::String name;    /**< Name of interface */
     bool isActivated;    /**< Set to true when interface is activated */
-    bool secure;         /**< Set to true if the interface is secure */
 };
 
 }

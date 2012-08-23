@@ -31,6 +31,7 @@
 #include <qcc/Thread.h>
 #include <qcc/time.h>
 #include <qcc/SocketTypes.h>
+#include <qcc/Timer.h>
 
 #include <alljoyn/BusObject.h>
 #include <alljoyn/Message.h>
@@ -40,10 +41,7 @@
 #include "RemoteEndpoint.h"
 #include "Transport.h"
 #include "VirtualEndpoint.h"
-
-#if defined(QCC_OS_ANDROID)
-#include "PermissionDB.h"
-#endif
+#include "PermissionMgr.h"
 
 namespace ajn {
 
@@ -54,7 +52,7 @@ class BusController;
  * BusObject responsible for implementing the standard AllJoyn methods at org.alljoyn.Bus
  * for messages directed to the bus.
  */
-class AllJoynObj : public BusObject, public NameListener, public TransportListener {
+class AllJoynObj : public BusObject, public NameListener, public TransportListener, public qcc::AlarmListener {
     friend class RemoteEndpoint;
 
   public:
@@ -391,17 +389,21 @@ class AllJoynObj : public BusObject, public NameListener, public TransportListen
         qcc::String busAddr;
         qcc::String guid;
         TransportMask transport;
-        uint32_t timestamp;
-        uint32_t ttl;
+        uint64_t timestamp;
+        uint64_t ttl;
+        qcc::Alarm alarm;
+        static void* truthiness;
 
-        NameMapEntry(const qcc::String& busAddr, const qcc::String& guid, TransportMask transport, uint32_t ttl) :
+        NameMapEntry(const qcc::String& busAddr, const qcc::String& guid, TransportMask transport, uint64_t ttl, qcc::AlarmListener* listener) :
             busAddr(busAddr),
             guid(guid),
             transport(transport),
-            timestamp(qcc::GetTimestamp()),
-            ttl(ttl) { }
+            timestamp(qcc::GetTimestamp64()),
+            ttl(ttl),
+            alarm(ttl, listener, truthiness) { }
     };
-    std::multimap<qcc::String, NameMapEntry> nameMap;
+    typedef std::multimap<qcc::String, NameMapEntry> NameMapType;
+    NameMapType nameMap;
 
     /* Session map */
     struct SessionMapEntry {
@@ -456,18 +458,14 @@ class AllJoynObj : public BusObject, public NameListener, public TransportListen
 
     std::map<qcc::StringMapKey, RemoteEndpoint*> b2bEndpoints;    /**< Map of bus-to-bus endpoints that are connected to external daemons */
 
-    /** NameMapReaperThread removes expired names from the nameMap */
-    class NameMapReaperThread : public qcc::Thread {
-      public:
-        NameMapReaperThread(AllJoynObj* ajnObj) : qcc::Thread("NameMapReaper"), ajnObj(ajnObj) { }
+    qcc::Timer timer;           /**< Timer object for reaping expired names */
 
-        qcc::ThreadReturn STDCALL Run(void* arg);
-
-      private:
-        AllJoynObj* ajnObj;
-    };
-
-    NameMapReaperThread nameMapReaper;                   /**< Removes expired names from nameMap */
+    /**
+     * Name reaper timeout alarm handler.
+     *
+     * @param alarm  The alarm object for the timeout that expired.
+     */
+    void AlarmTriggered(const qcc::Alarm& alarm, QStatus reason);
 
     /** JoinSessionThread handles a JoinSession request from a local client on a separate thread */
     class JoinSessionThread : public qcc::Thread, public qcc::ThreadListener {
@@ -507,14 +505,6 @@ class AllJoynObj : public BusObject, public NameListener, public TransportListen
      * Release AllJoynObj locks.
      */
     void ReleaseLocks();
-
-    /**
-     * Called to check whether have enough permissions to use designated transports.
-     * @param   sender        The sender's well-known name string
-     * @param   transports    The transport mask
-     * @param   callerName    The caller that invokes this check
-     */
-    QStatus CheckTransportsPermission(const qcc::String& sender, TransportMask& transports, const char* callerName);
 
     /**
      * Utility function used to send a single FoundName signal.

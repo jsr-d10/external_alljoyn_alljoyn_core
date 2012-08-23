@@ -21,6 +21,7 @@
 #include <vector>
 
 #include <qcc/String.h>
+#include <qcc/Util.h>
 
 #include <alljoyn/BusAttachment.h>
 #include <alljoyn/DBusStd.h>
@@ -53,7 +54,10 @@ class DBusObjTest : public testing::Test {
         ASSERT_EQ(ER_OK, status) << "  Actual Status: " << QCC_StatusText(status);
     }
 
-    //virtual void TearDown() {}
+    virtual void TearDown() {
+        bus.Stop();
+        bus.Join();
+    }
 
 };
 
@@ -110,7 +114,6 @@ TEST_F(DBusObjTest, RequestName_DuplicateName_Fail)
 
 TEST_F(DBusObjTest, ListQueuedOwners) {
     QStatus status = ER_OK;
-    QStatus testStatus = ER_OK;
 
     /* Create message bus */
     BusAttachment bus2("testDBusObj2", false);
@@ -160,7 +163,7 @@ TEST_F(DBusObjTest, ListQueuedOwners) {
     ASSERT_EQ(ER_OK, status) << "  Actual Status: " << QCC_StatusText(status);
 
     reply->GetArg(0)->Get("as", &las, &asArray);
-    ASSERT_EQ(las, 0);
+    ASSERT_EQ(static_cast<size_t>(0), las);
     queuedNames.clear();
     queuedNames.reserve(las);
     for (unsigned int i = 0; i < las; ++i) {
@@ -182,7 +185,7 @@ TEST_F(DBusObjTest, ListQueuedOwners) {
     ASSERT_EQ(ER_OK, status) << "  Actual Status: " << QCC_StatusText(status);
 
     reply->GetArg(0)->Get("as", &las, &asArray);
-    ASSERT_EQ(las, 0);
+    ASSERT_EQ(static_cast<size_t>(0), las);
     queuedNames.clear();
     queuedNames.reserve(las);
     for (unsigned int i = 0; i < las; ++i) {
@@ -208,7 +211,7 @@ TEST_F(DBusObjTest, ListQueuedOwners) {
 
     status = reply->GetArg(0)->Get("as", &las, &asArray);
     ASSERT_EQ(ER_OK, status) << "  Actual Status: " << QCC_StatusText(status);
-    ASSERT_EQ(2, las);
+    ASSERT_EQ(static_cast<size_t>(2), las);
     queuedNames.clear();
     queuedNames.resize(las);
     for (unsigned int i = 0; i < las; ++i) {
@@ -229,7 +232,7 @@ TEST_F(DBusObjTest, ListQueuedOwners) {
     ASSERT_EQ(ER_OK, status) << "  Actual Status: " << QCC_StatusText(status);
 
     reply->GetArg(0)->Get("as", &las, &asArray);
-    ASSERT_EQ(3, las);
+    ASSERT_EQ(static_cast<size_t>(3), las);
     queuedNames.clear();
     queuedNames.resize(las);
     for (unsigned int i = 0; i < las; ++i) {
@@ -246,8 +249,55 @@ TEST_F(DBusObjTest, ListQueuedOwners) {
     bus3.ReleaseName("com.test.foo");
     bus4.ReleaseName("com.test.foo");
 
-    bus.Stop();
     bus2.Stop();
     bus3.Stop();
     bus4.Stop();
+}
+
+TEST_F(DBusObjTest, GetConnectionUnixUser) {
+    QStatus status = ER_FAIL;
+    const char* name = "org.alljoyn.bus.ifaces.testGetConnctionUnixUser";
+    uint32_t flags = 0;
+    status = bus.RequestName(name, flags);
+    EXPECT_EQ(ER_OK, status) << "  Actual Status: " << QCC_StatusText(status);
+
+    ProxyBusObject dbusObj(bus.GetDBusProxyObj());
+
+    MsgArg arg("s", name);
+    Message reply(bus);
+    status = dbusObj.MethodCall("org.freedesktop.DBus", "GetConnectionUnixUser", &arg, 1, reply);
+#if defined(QCC_OS_GROUP_WINDOWS)
+    EXPECT_EQ(ER_BUS_REPLY_IS_ERROR_MESSAGE, status);
+#else
+    ASSERT_EQ(ER_OK, status) << "  Actual Status: " << QCC_StatusText(status);
+    uint32_t uid = 0;
+    const MsgArg* uidArg = reply->GetArg(0);
+    uidArg->Get("u", &uid);
+    EXPECT_EQ(qcc::GetUid(), uid);
+#endif
+    status = bus.ReleaseName(name);
+    EXPECT_EQ(ER_OK, status) << "  Actual Status: " << QCC_StatusText(status);
+}
+
+TEST_F(DBusObjTest, GetConnectionUnixProcessID) {
+    QStatus status = ER_FAIL;
+    const char* name = "org.alljoyn.bus.ifaces.testGetConnectionUnixProcessID";
+    uint32_t flags = 0;
+    status = bus.RequestName(name, flags);
+    EXPECT_EQ(ER_OK, status) << "  Actual Status: " << QCC_StatusText(status)  << "\n\t" << name;;
+
+    ProxyBusObject dbusObj(bus.GetDBusProxyObj());
+    MsgArg arg("s", name);
+    Message reply(bus);
+    status = dbusObj.MethodCall("org.freedesktop.DBus", "GetConnectionUnixProcessID", &arg, 1, reply);
+#if defined(QCC_OS_GROUP_WINDOWS)
+    EXPECT_EQ(ER_BUS_REPLY_IS_ERROR_MESSAGE, status);
+#else
+    ASSERT_EQ(ER_OK, status) << "  Actual Status: " << QCC_StatusText(status);
+    uint32_t pid = 0;
+    reply->GetArg(0)->Get("u", &pid);
+    EXPECT_EQ(qcc::GetPid(), pid);
+#endif
+    status = bus.ReleaseName(name);
+    EXPECT_EQ(ER_OK, status) << "  Actual Status: " << QCC_StatusText(status);
 }

@@ -60,6 +60,7 @@ using namespace qcc;
 
 namespace ajn {
 
+void* AllJoynObj::NameMapEntry::truthiness = reinterpret_cast<void*>(true);
 int AllJoynObj::JoinSessionThread::jstCount = 0;
 
 void AllJoynObj::AcquireLocks()
@@ -90,7 +91,7 @@ AllJoynObj::AllJoynObj(Bus& bus, BusController* busController) :
     guid(bus.GetInternal().GetGlobalGUID()),
     exchangeNamesSignal(NULL),
     detachSessionSignal(NULL),
-    nameMapReaper(this),
+    timer("NameReaper"),
     isStopping(false),
     busController(busController)
 {
@@ -99,6 +100,7 @@ AllJoynObj::AllJoynObj(Bus& bus, BusController* busController) :
 AllJoynObj::~AllJoynObj()
 {
     bus.UnregisterBusObject(*this);
+    router.RemoveBusNameListener(this);
 
     /* Wait for any outstanding JoinSessionThreads */
     joinSessionThreadsLock.Lock(MUTEX_CONTEXT);
@@ -232,7 +234,7 @@ QStatus AllJoynObj::Init()
 
     /* Start the name reaper */
     if (ER_OK == status) {
-        status = nameMapReaper.Start();
+        status = timer.Start();
     }
 
     if (ER_OK == status) {
@@ -289,47 +291,6 @@ void AllJoynObj::ObjectRegistered(void)
     }
 }
 
-QStatus AllJoynObj::CheckTransportsPermission(const qcc::String& sender, TransportMask& transports, const char* callerName)
-{
-    QStatus status = ER_OK;
-#if defined(QCC_OS_ANDROID)
-    AcquireLocks();
-    BusEndpoint* srcEp = router.FindEndpoint(sender);
-    uint32_t uid = srcEp ? srcEp->GetUserId() : -1;
-    if (srcEp != NULL) {
-        if (transports & TRANSPORT_BLUETOOTH && (uid != static_cast<uint32_t>(-1))) {
-            bool allowed = PermissionDB::GetDB().IsBluetoothAllowed(uid);
-            if (!allowed) {
-                transports ^= TRANSPORT_BLUETOOTH;
-                QCC_LogError(ER_ALLJOYN_ACCESS_PERMISSION_WARNING, ("AllJoynObj::%s() WARNING: No permission to use Bluetooth", (callerName == NULL) ? "" : callerName));
-            }
-        }
-        if (transports & TRANSPORT_WLAN && (uid != static_cast<uint32_t>(-1))) {
-            bool allowed = PermissionDB::GetDB().IsWifiAllowed(uid);
-            if (!allowed) {
-                transports ^= TRANSPORT_WLAN;
-                QCC_LogError(ER_ALLJOYN_ACCESS_PERMISSION_WARNING, ("AllJoynObj::%s() WARNING: No permission to use Wifi", ((callerName == NULL) ? "" : callerName)));
-            }
-        }
-        if (transports & TRANSPORT_ICE && (uid != static_cast<uint32_t>(-1))) {
-            bool allowed = PermissionDB::GetDB().IsWifiAllowed(uid);
-            if (!allowed) {
-                transports ^= TRANSPORT_ICE;
-                QCC_LogError(ER_ALLJOYN_ACCESS_PERMISSION_WARNING, ("AllJoynObj::%s() WARNING: No permission to use Wifi for ICE", ((callerName == NULL) ? "" : callerName)));
-            }
-        }
-        if (transports == 0) {
-            status = ER_BUS_NO_TRANSPORTS;
-        }
-    } else {
-        status = ER_BUS_NO_ENDPOINT;
-        QCC_LogError(ER_BUS_NO_ENDPOINT, ("AllJoynObj::CheckTransportsPermission No Bus Endpoint found for Sender %s", sender.c_str()));
-    }
-    ReleaseLocks();
-#endif
-    return status;
-}
-
 void AllJoynObj::BindSessionPort(const InterfaceDescription::Member* member, Message& msg)
 {
     uint32_t replyCode = ALLJOYN_BINDSESSIONPORT_REPLY_SUCCESS;
@@ -345,7 +306,8 @@ void AllJoynObj::BindSessionPort(const InterfaceDescription::Member* member, Mes
     String sender = msg->GetSender();
 
     if (status == ER_OK) {
-        status = CheckTransportsPermission(sender, opts.transports, "BindSessionPort");
+        BusEndpoint* srcEp = router.FindEndpoint(sender);
+        status = TransportPermission::FilterTransports(srcEp, sender, opts.transports, "BindSessionPort");
     }
 
     if (status != ER_OK) {
@@ -493,7 +455,8 @@ ThreadReturn STDCALL AllJoynObj::JoinSessionThread::RunJoin()
     }
 
     if (status == ER_OK) {
-        status = ajObj.CheckTransportsPermission(sender, optsIn.transports, "JoinSessionThread.Run");
+        BusEndpoint* srcEp = ajObj.router.FindEndpoint(sender);
+        status = TransportPermission::FilterTransports(srcEp, sender, optsIn.transports, "JoinSessionThread.Run");
     }
 
     ajObj.AcquireLocks();
@@ -537,13 +500,13 @@ ThreadReturn STDCALL AllJoynObj::JoinSessionThread::RunJoin()
             bool foundSessionMapEntry = false;
             SessionMapType::iterator sit = ajObj.SessionMapLowerBound(creatorName, 0);
             while ((sit != ajObj.sessionMap.end()) && (creatorName == sit->first.first)) {
-                if ((sit->first.second == 0) && (sit->second.sessionPort == sessionPort)) {
+                if ((sit->first.second == 0) && (sit->second.sessionHost == creatorName) && (sit->second.sessionPort == sessionPort)) {
                     sme = sit->second;
                     foundSessionMapEntry = true;
                     if (!sme.opts.isMultipoint) {
                         break;
                     }
-                } else if ((sit->first.second != 0) && (sit->second.sessionPort == sessionPort)) {
+                } else if ((sit->first.second != 0) && (sit->second.sessionHost == creatorName) && (sit->second.sessionPort == sessionPort)) {
                     /* Check if this joiner has already joined and reject in that case */
                     vector<String>::iterator mit = sit->second.memberNames.begin();
                     while (mit != sit->second.memberNames.end()) {
@@ -788,7 +751,7 @@ ThreadReturn STDCALL AllJoynObj::JoinSessionThread::RunJoin()
             }
 
             /* Step 2: Wait for the new b2b endpoint to have a virtual ep for nextController */
-            uint32_t startTime = GetTimestamp();
+            uint64_t startTime = GetTimestamp64();
             b2bEp = static_cast<RemoteEndpoint*>(ajObj.router.FindEndpoint(b2bEpName));
             while (replyCode == ALLJOYN_JOINSESSION_REPLY_SUCCESS) {
                 /* Do we route through b2bEp? If so, we're done */
@@ -804,8 +767,8 @@ ThreadReturn STDCALL AllJoynObj::JoinSessionThread::RunJoin()
                 }
 
                 /* Otherwise wait */
-                uint32_t now = GetTimestamp();
-                if (now > (startTime + 30000)) {
+                uint64_t now = GetTimestamp64();
+                if (now > (startTime + 30000LL)) {
                     replyCode = ALLJOYN_JOINSESSION_REPLY_FAILED;
                     QCC_LogError(ER_FAIL, ("JoinSession timed out waiting for %s to appear on %s",
                                            sessionHost, b2bEp->GetUniqueName().c_str()));
@@ -1329,13 +1292,7 @@ qcc::ThreadReturn STDCALL AllJoynObj::JoinSessionThread::RunAttach()
                                 id = smEntry->id;
                                 destIsLocal = true;
                                 creatorName = creatorEp->GetUniqueName();
-
-                                /* AttachSession response will contain list of members */
-                                vector<const char*> nameVec(smEntry->memberNames.size());
-                                for (size_t i = 0; i < nameVec.size(); ++i) {
-                                    nameVec[i] = smEntry->memberNames[i].c_str();
-                                }
-                                replyArgs[3].Set("as", nameVec.size(), nameVec.empty() ? NULL : &nameVec.front());
+                                replyArgs[3].Set("a$", smEntry->memberNames.size(), &smEntry->memberNames.front());
                             } else {
                                 replyCode = ALLJOYN_JOINSESSION_REPLY_FAILED;
                             }
@@ -1414,13 +1371,13 @@ qcc::ThreadReturn STDCALL AllJoynObj::JoinSessionThread::RunAttach()
                 status = ajObj.SendAttachSession(sessionPort, src, sessionHost, dest, b2bEpName.c_str(), nextControllerName.c_str(),
                                                  msg->GetSessionId(), busAddr, optsIn, replyCode, tempId, tempOpts, replyArgs[3]);
                 ajObj.AcquireLocks();
-                b2bEp = NULL;
+                b2bEp = static_cast<RemoteEndpoint*>(ajObj.router.FindEndpoint(b2bEpName));
 
                 /* If successful, add bi-directional session routes */
                 if ((status == ER_OK) && (replyCode == ALLJOYN_JOINSESSION_REPLY_SUCCESS)) {
 
                     /* Wait for dest to appear with a route through b2bEp */
-                    uint32_t startTime = GetTimestamp();
+                    uint64_t startTime = GetTimestamp64();
                     VirtualEndpoint* vDestEp = NULL;
                     while (replyCode == ALLJOYN_JOINSESSION_REPLY_SUCCESS) {
                         /* Does vSessionEp route through b2bEp? If so, we're done */
@@ -1435,8 +1392,8 @@ qcc::ThreadReturn STDCALL AllJoynObj::JoinSessionThread::RunAttach()
                             break;
                         }
                         /* Otherwise wait */
-                        uint32_t now = GetTimestamp();
-                        if (now > (startTime + 30000)) {
+                        uint64_t now = GetTimestamp64();
+                        if (now > (startTime + 30000LL)) {
                             replyCode = ALLJOYN_JOINSESSION_REPLY_FAILED;
                             QCC_LogError(ER_FAIL, ("AttachSession timed out waiting for destination to appear"));
                             break;
@@ -1485,7 +1442,7 @@ qcc::ThreadReturn STDCALL AllJoynObj::JoinSessionThread::RunAttach()
      */
     srcB2BEp = srcB2B ? static_cast<RemoteEndpoint*>(ajObj.router.FindEndpoint(srcB2BStr)) : NULL;
     if (srcB2BEp) {
-        srcB2BEp->IncrementWaiters();
+        srcB2BEp->IncrementPushCount();
     }
     ajObj.ReleaseLocks();
     if (srcB2BEp) {
@@ -1497,7 +1454,7 @@ qcc::ThreadReturn STDCALL AllJoynObj::JoinSessionThread::RunAttach()
         status = ajObj.MethodReply(msg, replyArgs, ArraySize(replyArgs));
     }
     if (srcB2BEp) {
-        srcB2BEp->DecrementWaiters();
+        srcB2BEp->DecrementPushCount();
     }
     ajObj.AcquireLocks();
     srcB2BEp  = !srcB2BStr.empty() ? static_cast<RemoteEndpoint*>(ajObj.router.FindEndpoint(srcB2BStr)) : NULL;
@@ -1774,7 +1731,7 @@ void AllJoynObj::GetSessionInfo(const InterfaceDescription::Member* member, Mess
     if (busAddrs.empty()) {
         status = MethodReply(msg, ER_BUS_NO_SESSION);
     } else {
-        MsgArg replyArg("as", busAddrs.size(), NULL, &busAddrs[0]);
+        MsgArg replyArg("a$", busAddrs.size(), &busAddrs[0]);
         status = MethodReply(msg, &replyArg, 1);
     }
 
@@ -1815,7 +1772,7 @@ QStatus AllJoynObj::SendAttachSession(SessionPort sessionPort,
     BusEndpoint* ep = router.FindEndpoint(remoteB2BName);
     RemoteEndpoint* b2bEp = (ep && ep->GetEndpointType() == BusEndpoint::ENDPOINT_TYPE_BUS2BUS) ?  static_cast<RemoteEndpoint*>(ep) : NULL;
     if (b2bEp) {
-        b2bEp->IncrementWaiters();
+        b2bEp->IncrementPushCount();
     } else {
         status = ER_BUS_NO_ENDPOINT;
         QCC_LogError(status, ("Cannot find B2BEp for %s", remoteB2BName));
@@ -1850,7 +1807,7 @@ QStatus AllJoynObj::SendAttachSession(SessionPort sessionPort,
 
     /* Free the stable reference */
     if (b2bEp) {
-        b2bEp->DecrementWaiters();
+        b2bEp->DecrementPushCount();
     }
 
     if (status != ER_OK) {
@@ -2085,8 +2042,8 @@ void AllJoynObj::GetSessionFd(const InterfaceDescription::Member* member, Messag
     AcquireLocks();
     SessionMapEntry* smEntry = SessionMapFind(msg->GetSender(), id);
     if (smEntry && (smEntry->opts.traffic != SessionOpts::TRAFFIC_MESSAGES)) {
-        uint32_t ts = GetTimestamp();
-        while (smEntry && ((sockFd = smEntry->fd) == -1) && ((ts + 5000) > GetTimestamp())) {
+        uint64_t ts = GetTimestamp64();
+        while (smEntry && ((sockFd = smEntry->fd) == -1) && ((ts + 5000LL) > GetTimestamp64())) {
             ReleaseLocks();
             qcc::Sleep(5);
             AcquireLocks();
@@ -2226,33 +2183,11 @@ void AllJoynObj::AliasUnixUser(const InterfaceDescription::Member* member, Messa
     const MsgArg* args;
     msg->GetArgs(numArgs, args);
     uint32_t aliasUID = args[0].v_uint32;
-
-#if defined(QCC_OS_ANDROID)
-    QStatus status = ER_OK;
     uint32_t origUID = 0;
     qcc::String sender = msg->GetSender();
     BusEndpoint* srcEp = router.FindEndpoint(sender);
+    replyCode = PermissionMgr::AddAliasUnixUser(srcEp, sender, origUID, aliasUID);
 
-    if (!srcEp) {
-        status = ER_BUS_NO_ENDPOINT;
-        QCC_LogError(status, ("AliasUnixUser Failed to find endpoint for sender=%s", sender.c_str()));
-        replyCode = ALLJOYN_ALIASUNIXUSER_REPLY_FAILED;
-    } else {
-        origUID = srcEp->GetUserId();
-        if (origUID == (uint32_t)-1 || aliasUID == (uint32_t)-1) {
-            QCC_LogError(ER_FAIL, ("AliasUnixUser Invalid user id origUID=%d aliasUID=%d", origUID, aliasUID));
-            replyCode = ALLJOYN_ALIASUNIXUSER_REPLY_FAILED;
-        }
-    }
-
-    if (replyCode == ALLJOYN_ALIASUNIXUSER_REPLY_SUCCESS) {
-        if (PermissionDB::GetDB().AddAliasUnixUser(origUID, aliasUID) != ER_OK) {
-            replyCode = ALLJOYN_ALIASUNIXUSER_REPLY_FAILED;
-        }
-    }
-#else
-    replyCode = ALLJOYN_ALIASUNIXUSER_REPLY_NO_SUPPORT;
-#endif
     /* Send response */
     MsgArg replyArg;
     replyArg.Set("u", replyCode);
@@ -2278,7 +2213,8 @@ void AllJoynObj::AdvertiseName(const InterfaceDescription::Member* member, Messa
     qcc::String sender = msg->GetSender();
 
     if (status == ER_OK) {
-        status = CheckTransportsPermission(sender, transports, "AdvertiseName");
+        BusEndpoint* srcEp = router.FindEndpoint(sender);
+        status = TransportPermission::FilterTransports(srcEp, sender, transports, "AdvertiseName");
     }
 
     /* Check to see if the advertise name is valid and well formed */
@@ -2503,21 +2439,13 @@ void AllJoynObj::FindAdvertisedName(const InterfaceDescription::Member* member, 
         ReleaseLocks();
         if (notifyTransports) {
             TransportList& transList = bus.GetInternal().GetTransportList();
+            TransportPermission::GetForbiddenTransports(uid, transList, transForbidden, "AllJoynObj::FindAdvertisedName");
             for (size_t i = 0; i < transList.GetNumTransports(); ++i) {
                 Transport* trans = transList.GetTransport(i);
                 if (trans && (uid != static_cast<uint32_t>(-1))) {
-#if defined(QCC_OS_ANDROID)
-                    if (trans->GetTransportMask() & TRANSPORT_BLUETOOTH && !PermissionDB::GetDB().IsBluetoothAllowed(uid)) {
-                        QCC_LogError(ER_ALLJOYN_ACCESS_PERMISSION_WARNING, ("AllJoynObj::FindAdvertisedName WARNING: No permission to use Bluetooth"));
-                        transForbidden |= TRANSPORT_BLUETOOTH;
+                    if (transForbidden & trans->GetTransportMask()) {
                         continue;
                     }
-                    if (trans->GetTransportMask() & TRANSPORT_WLAN && !PermissionDB::GetDB().IsWifiAllowed(uid)) {
-                        QCC_LogError(ER_ALLJOYN_ACCESS_PERMISSION_WARNING, ("AllJoynObj::FindAdvertisedName WARNING: No permission to use Wifi"));
-                        transForbidden |= TRANSPORT_WLAN;
-                        continue;
-                    }
-#endif
                     trans->EnableDiscovery(namePrefix.c_str());
                 } else {
                     QCC_LogError(ER_BUS_TRANSPORT_NOT_AVAILABLE, ("NULL transport pointer found in transportList"));
@@ -2742,13 +2670,13 @@ void AllJoynObj::RemoveBusToBusEndpoint(RemoteEndpoint& endpoint)
                         String key = it->first;
                         String key2 = it2->first.c_str();
                         RemoteEndpoint*ep = it2->second;
-                        ep->IncrementWaiters();
+                        ep->IncrementPushCount();
                         ReleaseLocks();
                         status = ep->PushMessage(sigMsg);
                         if (ER_OK != status) {
                             QCC_LogError(status, ("Failed to send NameChanged to %s", ep->GetUniqueName().c_str()));
                         }
-                        ep->DecrementWaiters();
+                        ep->DecrementPushCount();
                         AcquireLocks();
                         it2 = b2bEndpoints.lower_bound(key2);
                         if ((it2 != b2bEndpoints.end()) && (it2->first == key2)) {
@@ -2838,10 +2766,10 @@ QStatus AllJoynObj::ExchangeNames(RemoteEndpoint& endpoint)
                                         0,
                                         0);
         if (ER_OK == status) {
-            endpoint.IncrementWaiters();
+            endpoint.IncrementPushCount();
             ReleaseLocks();
             status = endpoint.PushMessage(exchangeMsg);
-            endpoint.DecrementWaiters();
+            endpoint.DecrementPushCount();
             AcquireLocks();
         }
     }
@@ -2930,14 +2858,15 @@ void AllJoynObj::ExchangeNamesSignalHandler(const InterfaceDescription::Member* 
                 QCC_DbgPrintf(("Propagating ExchangeName signal to %s", it->second->GetUniqueName().c_str()));
                 StringMapKey key = it->first;
                 RemoteEndpoint*ep = it->second;
-                ep->IncrementWaiters();
+                ep->IncrementPushCount();
                 ReleaseLocks();
                 QStatus status = ep->PushMessage(msg);
                 if (ER_OK != status) {
                     QCC_LogError(status, ("Failed to forward ExchangeNames to %s", ep->GetUniqueName().c_str()));
                 }
-                ep->DecrementWaiters();
+                ep->DecrementPushCount();
                 AcquireLocks();
+                bit = b2bEndpoints.find(msg->GetRcvEndpointName());
                 it = b2bEndpoints.lower_bound(key);
                 if ((it != b2bEndpoints.end()) && (it->first == key)) {
                     ++it;
@@ -3018,14 +2947,15 @@ void AllJoynObj::NameChangedSignalHandler(const InterfaceDescription::Member* me
                 QCC_DbgPrintf(("Propagating NameChanged signal to %s", it->second->GetUniqueName().c_str()));
                 String key = it->first.c_str();
                 RemoteEndpoint*ep = it->second;
-                ep->IncrementWaiters();
+                ep->IncrementPushCount();
                 ReleaseLocks();
                 QStatus status = ep->PushMessage(msg);
                 if (ER_OK != status) {
                     QCC_LogError(status, ("Failed to forward NameChanged to %s", ep->GetUniqueName().c_str()));
                 }
-                ep->DecrementWaiters();
+                ep->DecrementPushCount();
                 AcquireLocks();
+                bit = b2bEndpoints.find(msg->GetRcvEndpointName());
                 it = b2bEndpoints.lower_bound(key);
                 if ((it != b2bEndpoints.end()) && (it->first == key)) {
                     ++it;
@@ -3228,10 +3158,10 @@ void AllJoynObj::NameOwnerChanged(const qcc::String& alias, const qcc::String* o
             if (ER_OK == status) {
                 StringMapKey key = it->first;
                 RemoteEndpoint*ep = it->second;
-                ep->IncrementWaiters();
+                ep->IncrementPushCount();
                 ReleaseLocks();
                 status = ep->PushMessage(sigMsg);
-                ep->DecrementWaiters();
+                ep->DecrementPushCount();
                 AcquireLocks();
                 it = b2bEndpoints.lower_bound(key);
                 if ((it != b2bEndpoints.end()) && (it->first == key)) {
@@ -3355,6 +3285,7 @@ void AllJoynObj::FoundNames(const qcc::String& busAddr,
                 NameMapEntry& nme = it->second;
                 if ((nme.guid == guid) && (nme.busAddr == busAddr)) {
                     lostNameSet.insert(it->first);
+                    timer.RemoveAlarm(nme.alarm, false);
                     nameMap.erase(it++);
                 } else {
                     it++;
@@ -3364,6 +3295,7 @@ void AllJoynObj::FoundNames(const qcc::String& busAddr,
     } else {
         /* Generate a list of name deltas */
         vector<String>::const_iterator nit = names->begin();
+        bool notimers = true;
         while (nit != names->end()) {
             multimap<String, NameMapEntry>::iterator it = nameMap.find(*nit);
             bool isNew = true;
@@ -3377,16 +3309,25 @@ void AllJoynObj::FoundNames(const qcc::String& busAddr,
             if (0 < ttl) {
                 if (isNew) {
                     /* Add new name to map */
-                    nameMap.insert(pair<String, NameMapEntry>(*nit, NameMapEntry(busAddr,
-                                                                                 guid,
-                                                                                 transport,
-                                                                                 (ttl == numeric_limits<uint8_t>::max()) ? numeric_limits<uint32_t>::max() : (1000 * ttl))));
-
+                    NameMapType::iterator it = nameMap.insert(NameMapType::value_type(*nit, NameMapEntry(busAddr,
+                                                                                                         guid,
+                                                                                                         transport,
+                                                                                                         (ttl == numeric_limits<uint8_t>::max()) ? numeric_limits<uint64_t>::max() : (1000LL * ttl),
+                                                                                                         this)));
+                    // Don't schedule an alarm which will never expire or multiple timers for the same set
+                    if (notimers && (ttl != numeric_limits<uint8_t>::max())) {
+                        NameMapEntry& nme = it->second;
+                        QStatus status = timer.AddAlarm(nme.alarm);
+                        if (ER_OK != status && ER_TIMER_EXITING != status) {
+                            QCC_LogError(status, ("Failed to add alarm"));
+                        } else {
+                            notimers = false;
+                        }
+                    }
                     /* Send FoundAdvertisedName to anyone who is discovering *nit */
                     if (0 < discoverMap.size()) {
                         multimap<String, String>::const_iterator dit = discoverMap.begin();
                         while ((dit != discoverMap.end()) && (dit->first.compare(*nit) <= 0)) {
-
                             if (nit->compare(0, dit->first.size(), dit->first) == 0) {
                                 /* Check whether the discoverer is allowed to use the transport over which the advertised name if found*/
                                 bool forbidden = false;
@@ -3415,15 +3356,40 @@ void AllJoynObj::FoundNames(const qcc::String& busAddr,
                      * and don't tell clients about this alternate way to connect to the name
                      * since it will look like a duplicate to the client (that doesn't receive busAddr).
                      */
-                    if (busAddr == it->second.busAddr) {
-                        it->second.timestamp = GetTimestamp();
+                    if (notimers && (busAddr == it->second.busAddr)) {
+                        NameMapEntry& nme = it->second;
+                        nme.timestamp = GetTimestamp64();
+
+                        // need to move the alarm ttl seconds into the future.
+                        const uint32_t timeout = ttl * 1000;
+                        AllJoynObj* pObj = this;
+                        Alarm newAlarm(timeout, pObj, NameMapEntry::truthiness);
+                        QStatus status = timer.ReplaceAlarm(nme.alarm, newAlarm, false);
+                        nme.alarm = newAlarm;
+
+                        if (ER_OK != status) {
+                            // This is expected if a prior name set changed in any way (order, removed entry, etc)
+                            status = timer.AddAlarm(nme.alarm);
+                            if (ER_OK != status && ER_TIMER_EXITING != status) {
+                                QCC_LogError(status, ("Failed to update alarm"));
+                            } else {
+                                notimers = false;
+                            }
+                        } else {
+                            notimers = false;
+                        }
+                    } else if (!notimers) {
+                        NameMapEntry& nme = it->second;
+                        // Just in case ordering changed, remove any spurious timer
+                        timer.RemoveAlarm(nme.alarm, false);
                     }
                 }
-                nameMapReaper.Alert();
             } else {
                 /* 0 == ttl means flush the record */
                 if (!isNew) {
+                    NameMapEntry& nme = it->second;
                     lostNameSet.insert(it->first);
+                    timer.RemoveAlarm(nme.alarm, false);
                     nameMap.erase(it);
                 }
             }
@@ -3501,48 +3467,28 @@ QStatus AllJoynObj::SendLostAdvertisedName(const String& name, TransportMask tra
     return status;
 }
 
-ThreadReturn STDCALL AllJoynObj::NameMapReaperThread::Run(void* arg)
+void AllJoynObj::AlarmTriggered(const Alarm& alarm, QStatus reason)
 {
-    uint32_t waitTime(Event::WAIT_FOREVER);
-    Event evt(waitTime);
-    while (!IsStopping()) {
-        ajnObj->AcquireLocks();
-        multimap<String, NameMapEntry>::iterator it = ajnObj->nameMap.begin();
-        uint32_t now = GetTimestamp();
-        waitTime = Event::WAIT_FOREVER;
-        while (it != ajnObj->nameMap.end()) {
-            // it->second.timestamp is an absolute time value
-            // it->second.ttl is a relative time value relative to it->second.timestamp
-            // now is an absolute time value for "right now" - may have rolled over relative to it->second.timestamp
-
-            uint32_t timeSinceTimestamp = now - it->second.timestamp;     // relative time value - 2's compliment math solves rollover
-
-            if (timeSinceTimestamp >= it->second.ttl) {
-                QCC_DbgPrintf(("Expiring discovered name %s for guid %s", it->first.c_str(), it->second.guid.c_str()));
-                ajnObj->SendLostAdvertisedName(it->first, it->second.transport);
-                ajnObj->nameMap.erase(it++);
-            } else {
-                if (it->second.ttl != numeric_limits<uint32_t>::max()) {
-                    // The TTL for this name map entry is less than infinte so we need to consider it
-
-                    uint32_t nextTime = it->second.ttl - timeSinceTimestamp;     // relative time when name map entry expires
-                    if (nextTime < waitTime) {
-                        // This name map entry expires before the time in waitTime so update waitTime.
-                        waitTime = nextTime;
-                    }
+    if (ER_OK == reason) {
+        AcquireLocks();
+        if ((bool)alarm->GetContext()) {
+            multimap<String, NameMapEntry>::iterator it = nameMap.begin();
+            uint64_t now = GetTimestamp64();
+            while (it != nameMap.end()) {
+                NameMapEntry& nme = it->second;
+                if ((now - nme.timestamp) >= nme.ttl) {
+                    QCC_DbgPrintf(("Expiring discovered name %s for guid %s", it->first.c_str(), nme.guid.c_str()));
+                    SendLostAdvertisedName(it->first, nme.transport);
+                    timer.RemoveAlarm(nme.alarm, false);
+                    nme.alarm->SetContext((void*)false);
+                    nameMap.erase(it++);
+                } else {
+                    ++it;
                 }
-                ++it;
             }
         }
-        ajnObj->ReleaseLocks();
-
-        evt.ResetTime(waitTime, 0);
-        QStatus status = Event::Wait(evt);
-        if (status == ER_ALERTED_THREAD) {
-            stopEvent.ResetEvent();
-        }
+        ReleaseLocks();
     }
-    return 0;
 }
 
 void AllJoynObj::BusConnectionLost(const qcc::String& busAddr)

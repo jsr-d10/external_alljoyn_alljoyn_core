@@ -93,6 +93,8 @@ class MyBusListener : public BusListener, public SessionListener {
         printf("FoundAdvertisedName(name=%s, prefix=%s)\n", name, namePrefix);
         if (0 == strcmp(name, SERVICE_NAME)) {
             /* We found a remote bus that is advertising basic sercice's  well-known name so connect to it */
+            /* Since we are in a callback we must enable concurrent callbacks before calling a synchronous method. */
+            g_msgBus->EnableConcurrentCallbacks();
             SessionOpts opts(SessionOpts::TRAFFIC_MESSAGES, false, SessionOpts::PROXIMITY_ANY, TRANSPORT_ANY);
             QStatus status = g_msgBus->JoinSession(name, SERVICE_PORT, this, s_sessionId, opts);
             if (ER_OK != status) {
@@ -149,7 +151,7 @@ class SrpKeyXListener : public AuthListener {
     }
 
     void AuthenticationComplete(const char* authMechanism, const char* authPeer, bool success) {
-        printf("Authentication %s %s\n", authMechanism, success ? "succesful" : "failed");
+        printf("Authentication %s %s\n", authMechanism, success ? "successful" : "failed");
     }
 };
 
@@ -211,7 +213,7 @@ int main(int argc, char** argv, char** envArg)
         if (ER_OK != status) {
             printf("BusAttachment::EnablePeerSecurity failed (%s)\n", QCC_StatusText(status));
         } else {
-            printf("BusAttachment::EnablePeerSecurity succesful\n");
+            printf("BusAttachment::EnablePeerSecurity successful\n");
         }
     }
 
@@ -259,10 +261,10 @@ int main(int argc, char** argv, char** envArg)
         inputs[0].Set("s", "ClientB says Hello AllJoyn!");
         status = remoteObj.MethodCall(INTERFACE_NAME, "Ping", inputs, 1, reply, 5000);
         if (ER_OK == status) {
-            printf("%s.%s ( path=%s) returned \"%s\"\n", INTERFACE_NAME, "Ping",
+            printf("%s.Ping (path=%s) returned \"%s\"\n", INTERFACE_NAME,
                    SERVICE_PATH, reply->GetArg(0)->v_string.str);
         } else {
-            printf("MethodCall on %s.%s failed\n", INTERFACE_NAME, "Ping");
+            printf("MethodCall on %s.Ping failed\n", INTERFACE_NAME);
         }
     }
 

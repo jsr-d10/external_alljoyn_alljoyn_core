@@ -397,37 +397,131 @@ TEST_F(InterfaceTest, AddSamePropertyToInterface_AndActivateItLater) {
 
 /* Interace xml with annotations */
 static const char ifcXML[] =
-    "  <interface name=\"org.alljoyn.xmlTest\">"
-    "    <method name=\"Deprecated\">"
-    "      <arg name=\"sock\" type=\"h\" direction=\"in\"/>"
-    "      <annotation name=\"org.freedesktop.DBus.Deprecated\" value=\"true\"/>"
-    "    </method>"
-    "    <method name=\"NoReply\">"
-    "      <arg name=\"sock\" type=\"h\" direction=\"out\"/>"
-    "      <annotation name=\"org.freedesktop.DBus.Method.NoReply\" value=\"true\"/>"
-    "    </method>"
-    "  </interface>";
+    "  <interface name=\"org.alljoyn.xmlTest\">\n"
+    "    <method name=\"Deprecated\">\n"
+    "      <arg name=\"sock\" type=\"h\" direction=\"in\"/>\n"
+    "      <annotation name=\"org.freedesktop.DBus.Deprecated\" value=\"true\"/>\n"
+    "    </method>\n"
+    "    <method name=\"NoReply\">\n"
+    "      <arg name=\"sock\" type=\"h\" direction=\"out\"/>\n"
+    "      <annotation name=\"org.freedesktop.DBus.Method.NoReply\" value=\"true\"/>\n"
+    "    </method>\n"
+    "    <annotation name=\"org.freedesktop.DBus.Method.MyAnnotation\" value=\"someValue\"/>\n"
+    "  </interface>\n";
+
+static const char ifcXML2[] =
+    "  <interface name=\"org.alljoyn.xmlTest\">\n"
+    "    <method name=\"Deprecated\">\n"
+    "      <arg name=\"sock\" type=\"h\" direction=\"in\"/>\n"
+    "      <annotation name=\"org.freedesktop.DBus.Deprecated\" value=\"true\"/>\n"
+    "    </method>\n"
+    "    <method name=\"NoReply\">\n"
+    "      <arg name=\"sock\" type=\"h\" direction=\"out\"/>\n"
+    "      <annotation name=\"org.freedesktop.DBus.Method.NoReply\" value=\"true\"/>\n"
+    "    </method>\n"
+    "    <property name=\"myproperty\" type=\"i\" access=\"readwrite\">\n"
+    "      <annotation name=\"prop_annotation\" value=\"unused\"/>\n"
+    "    </property>\n"
+    "    <annotation name=\"org.freedesktop.DBus.Method.MyAnnotation\" value=\"someValue\"/>\n"
+    "  </interface>\n";
+
+
+TEST_F(InterfaceTest, FullAnnotationsXmlTest) {
+    QStatus status = ER_OK;
+
+    ASSERT_EQ(ER_OK, ServiceBusSetup());
+
+    InterfaceDescription* testIntf = NULL;
+    ServiceObject myService(*g_msgBus, "/org/alljoyn/xmlTest");
+
+    ASSERT_EQ(ER_OK, ServiceBusSetup());
+
+    /* Add org.alljoyn.alljoyn_test interface */
+    status = g_msgBus->CreateInterface("org.alljoyn.xmlTest", testIntf);
+    EXPECT_EQ(status, ER_OK);
+
+    testIntf->AddAnnotation("org.freedesktop.DBus.Method.MyAnnotation", "someValue");
+
+    testIntf->AddMethod("Deprecated", "h", NULL, "sock");
+    testIntf->AddMemberAnnotation("Deprecated", org::freedesktop::DBus::AnnotateDeprecated, "true");
+
+    testIntf->AddMethod("NoReply", NULL, "h", "sock");
+    testIntf->AddMemberAnnotation("NoReply", org::freedesktop::DBus::AnnotateNoReply, "true");
+
+
+    testIntf->AddProperty("myproperty", "i", PROP_ACCESS_RW);
+    testIntf->AddPropertyAnnotation("myproperty", "prop_annotation", "unused");
+
+    testIntf->Activate();
+    qcc::String xml = testIntf->Introspect(2);
+    EXPECT_STREQ(ifcXML2, xml.c_str());
+}
+
 
 // Test for ALLJOYN-397
 TEST_F(InterfaceTest, AnnotationXMLTest) {
     QStatus status = ER_OK;
 
-    ASSERT_EQ(ER_OK, ServiceBusSetup());
+    EXPECT_EQ(ER_OK, ServiceBusSetup());
 
     status = g_msgBus->CreateInterfacesFromXml(ifcXML);
-    ASSERT_EQ(status, ER_OK);
+    EXPECT_EQ(status, ER_OK);
 
     const InterfaceDescription* iface = g_msgBus->GetInterface("org.alljoyn.xmlTest");
     ASSERT_TRUE(iface != NULL);
 
     const InterfaceDescription::Member* deprecatedMem = iface->GetMember("Deprecated");
-    ASSERT_TRUE(deprecatedMem != NULL);
+    EXPECT_TRUE(deprecatedMem != NULL);
 
-    ASSERT_EQ(deprecatedMem->annotation, MEMBER_ANNOTATE_DEPRECATED);
+    //ASSERT_EQ(deprecatedMem->annotation, MEMBER_ANNOTATE_DEPRECATED);
+    qcc::String val;
+    EXPECT_TRUE(deprecatedMem->GetAnnotation(org::freedesktop::DBus::AnnotateDeprecated, val));
+    EXPECT_STREQ("true", val.c_str());
 
     const InterfaceDescription::Member* noreplyMem = iface->GetMember("NoReply");
-    ASSERT_TRUE(noreplyMem != NULL);
+    EXPECT_TRUE(noreplyMem != NULL);
 
-    ASSERT_EQ(noreplyMem->annotation, MEMBER_ANNOTATE_NO_REPLY);
+    //ASSERT_EQ(noreplyMem->annotation, MEMBER_ANNOTATE_NO_REPLY);
+    EXPECT_TRUE(noreplyMem->GetAnnotation(org::freedesktop::DBus::AnnotateNoReply, val));
+    EXPECT_STREQ("true", val.c_str());
+}
 
+/* Interace xml with optional argument name permutations */
+static const char ifcXMLArgNames[] =
+    "  <interface name=\"org.alljoyn.xmlTest\">\n"
+    "    <method name=\"Method0\">\n"
+    "      <arg type=\"s\" direction=\"in\"/>\n"
+    "      <arg type=\"s\" direction=\"out\"/>\n"
+    "    </method>\n"
+    "    <method name=\"Method1\">\n"
+    "      <arg name=\"arg0\" type=\"s\" direction=\"in\"/>\n"
+    "      <arg type=\"s\" direction=\"out\"/>\n"
+    "    </method>\n"
+    "    <method name=\"Method2\">\n"
+    "      <arg type=\"s\" direction=\"in\"/>\n"
+    "      <arg name=\"arg1\" type=\"s\" direction=\"out\"/>\n"
+    "    </method>\n"
+    "  </interface>\n";
+
+// Test for ALLJOYN-953
+TEST_F(InterfaceTest, ArgNamesTest) {
+    QStatus status = ER_OK;
+
+    status = g_msgBus->CreateInterfacesFromXml(ifcXMLArgNames);
+    EXPECT_EQ(status, ER_OK);
+
+    const InterfaceDescription* iface = g_msgBus->GetInterface("org.alljoyn.xmlTest");
+    ASSERT_TRUE(iface != NULL);
+
+    const InterfaceDescription::Member* member = iface->GetMember("Method0");
+    EXPECT_TRUE(member != NULL);
+    EXPECT_STREQ("", member->argNames.c_str());
+
+    member = iface->GetMember("Method1");
+    EXPECT_TRUE(member != NULL);
+    EXPECT_STREQ("arg0,", member->argNames.c_str());
+
+    member = iface->GetMember("Method2");
+    EXPECT_TRUE(member != NULL);
+    EXPECT_STREQ(",arg1", member->argNames.c_str());
 }

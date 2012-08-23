@@ -105,7 +105,7 @@ void ProximityScanEngine::PrintHysteresis() {
     QCC_DbgPrintf(("----------------------------------------------"));
 }
 
-ProximityScanEngine::ProximityScanEngine(DiscoveryManager*dm) : bus(dm->bus) {
+ProximityScanEngine::ProximityScanEngine(DiscoveryManager*dm) : mainTimer("ProximityScanTimer"), tScan(NULL), bus(dm->bus) {
 
     QCC_DbgTrace(("ProximityScanEngine::ProximityScanEngine() called"));
     tadd_count = 1;
@@ -137,6 +137,11 @@ void ProximityScanEngine::ProcessScanResults() {
     QCC_DbgPrintf(("Size of scan results = %d", proximityScanner->scanResults.size()));
     QCC_DbgPrintf(("Size of scan Hysteresis = %d", hysteresisMap.size()));
     QCC_DbgPrintf(("Size of scan Final Map = %d", finalMap.size()));
+
+
+
+
+
 
     std::map<std::pair<qcc::String, qcc::String>, bool>::iterator it;
     std::map<std::pair<qcc::String, qcc::String>, int>::iterator hit;
@@ -416,8 +421,12 @@ void ProximityScanEngine::StopScan() {
 
     QCC_DbgTrace(("ProximityScanEngine::StopScan() called"));
     // RemoveTimers
-    if (mainTimer.HasAlarm(*tScan)) {
-        mainTimer.RemoveAlarm(*myListener, *tScan);
+    if (tScan) {
+        if (mainTimer.HasAlarm(*tScan)) {
+            mainTimer.RemoveAlarm(*myListener, *tScan);
+        }
+        delete tScan;
+        tScan = NULL;
     }
     mainTimer.Stop();
     mainTimer.Join();
@@ -449,12 +458,11 @@ void ProximityScanEngine::StartScan() {
 
     uint32_t relativeTime = 5000;
     uint32_t periodMs = 0;
-    //AlarmListener*myListener = this;
     myListener = this;
-    Alarm tScan(relativeTime, myListener, periodMs);
+    void* vptr = NULL;
 
     // Add the alarm to the timer
-    this->tScan = &tScan;
+    this->tScan = new Alarm(relativeTime, myListener, vptr, periodMs);
     mainTimer.AddAlarm(*this->tScan);
 
 //    while (true) {
@@ -473,8 +481,9 @@ void ProximityScanEngine::StartScan() {
 void ProximityScanEngine::AddAlarm(uint32_t delay) {
 
     uint32_t periodMs = 0;
-    AlarmListener*myListener = this;
-    Alarm tScan(delay, myListener, periodMs);
+    AlarmListener* myListener = this;
+    void* vptr = NULL;
+    Alarm tScan(delay, myListener, vptr, periodMs);
     mainTimer.AddAlarm(tScan);
 }
 

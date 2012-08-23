@@ -51,6 +51,10 @@
 #include "posix/ICEPacketStream.h"
 #endif
 
+#ifdef QCC_OS_GROUP_WINRT
+#include "../winrt/ICEPacketStream.h"
+#endif
+
 using namespace qcc;
 
 
@@ -447,7 +451,7 @@ class DaemonICETransport : public Transport, public RemoteEndpoint::EndpointList
      * @internal
      * @brief Alarm handler
      */
-    void AlarmTriggered(const qcc::Alarm& alarm, QStatus status);
+    void AlarmTriggered(const Alarm& alarm, QStatus reason);
 
     /**
      * PacketEngineAccept callback
@@ -468,6 +472,10 @@ class DaemonICETransport : public Transport, public RemoteEndpoint::EndpointList
      * Name of transport used in transport specs.
      */
     static const char* TransportName;
+
+    void EndpointListLock(void) { m_endpointListLock.Lock(MUTEX_CONTEXT); };
+
+    void EndpointListUnlock(void) { m_endpointListLock.Unlock(MUTEX_CONTEXT); };
 
   private:
 
@@ -495,6 +503,9 @@ class DaemonICETransport : public Transport, public RemoteEndpoint::EndpointList
      * List of the GUIDs of the remote daemons trying to connected to this daemon.
      */
     list<String> IncomingICESessions;
+
+
+    ICESessionListenerImpl iceListener;
 
     /** AllocateICESessionThread handles a AllocateICESession request from a remote client on a separate thread */
     class AllocateICESessionThread : public Thread, public ThreadListener {
@@ -659,7 +670,8 @@ class DaemonICETransport : public Transport, public RemoteEndpoint::EndpointList
     Timer daemonICETransportTimer;
 
     qcc::Mutex pktStreamMapLock;
-    std::map<qcc::String, std::pair<ICEPacketStream, int32_t> > pktStreamMap;
+    typedef std::multimap<qcc::String, std::pair<ICEPacketStream, int32_t> > PacketStreamMap;
+    PacketStreamMap pktStreamMap;
 };
 
 } // namespace ajn

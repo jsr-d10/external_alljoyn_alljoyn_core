@@ -45,7 +45,7 @@
 #include "TCPTransport.h"
 #include "DaemonTransport.h"
 //disable bluetooth on windows.
-#if !defined(QCC_OS_WINDOWS)
+#if !defined(QCC_OS_GROUP_WINDOWS)
 #include "BTTransport.h"
 #endif
 
@@ -73,7 +73,8 @@ using namespace std;
 static const char defaultConfig[] =
     "<busconfig>"
     "  <type>alljoyn</type>"
-    "  <listen>tcp:addr=0.0.0.0,port=9955,family=ipv4</listen>"
+    "  <listen>tcp:addr=0.0.0.0,port=9956,family=ipv4</listen>"
+    "  <listen>localhost:port=9955</listen>"
     "  <listen>localhost:port=9956</listen>"
     "  <listen>bluetooth:</listen>"
     "  <listen>ice:</listen>"
@@ -300,7 +301,7 @@ int daemon(OptParse& opts)
     TransportFactoryContainer cntr;
     cntr.Add(new TransportFactory<DaemonTransport>(DaemonTransport::TransportName, false));
     cntr.Add(new TransportFactory<TCPTransport>(TCPTransport::TransportName, false));
-#if !defined(QCC_OS_WINDOWS)
+#if !defined(QCC_OS_GROUP_WINDOWS)
     if (!opts.GetNoBT()) {
         cntr.Add(new TransportFactory<BTTransport>("bluetooth", false));
     }

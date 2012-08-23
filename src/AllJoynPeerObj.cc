@@ -137,6 +137,7 @@ QStatus AllJoynPeerObj::Start()
 QStatus AllJoynPeerObj::Stop()
 {
     dispatcher.Stop();
+    bus.UnregisterBusListener(*this);
     return ER_OK;
 }
 
@@ -152,7 +153,6 @@ QStatus AllJoynPeerObj::Join()
     lock.Unlock(MUTEX_CONTEXT);
 
     dispatcher.Join();
-    bus.UnregisterBusListener(*this);
     return ER_OK;
 }
 
@@ -630,7 +630,7 @@ QStatus AllJoynPeerObj::AuthenticatePeer(AllJoynMessageType msgType, const qcc::
      * that use different names for the same peer, but we catch those below when we using the
      * unique name. Worst case we end up making a redundant ExchangeGuids method call.
      */
-    if (msgType != MESSAGE_SIGNAL) {
+    if (msgType == MESSAGE_METHOD_CALL) {
         lock.Lock(MUTEX_CONTEXT);
         if (peerState->GetAuthEvent()) {
             if (wait) {
@@ -664,7 +664,7 @@ QStatus AllJoynPeerObj::AuthenticatePeer(AllJoynMessageType msgType, const qcc::
          * propogated to the caller from this context.
          */
         if (status == ER_BUS_REPLY_IS_ERROR_MESSAGE) {
-            if (strcmp(replyMsg->GetErrorName(), "org.freedesktop.DBus.Error.ServiceUnknown") == 0) {
+            if (replyMsg->GetErrorName() != NULL && strcmp(replyMsg->GetErrorName(), "org.freedesktop.DBus.Error.ServiceUnknown") == 0) {
                 status = ER_BUS_NO_SUCH_OBJECT;
             } else {
                 status = ER_AUTH_FAIL;
@@ -741,11 +741,11 @@ QStatus AllJoynPeerObj::AuthenticatePeer(AllJoynMessageType msgType, const qcc::
         return ER_OK;
     }
     /*
-     * Signals don't trigger authentications so if the remote peer is not authenticated or in the
+     * Only method calls trigger authentications so if the remote peer is not authenticated or in the
      * process or being authenticated we return an error status which will cause a security
      * violation notification back to the application.
      */
-    if (msgType == MESSAGE_SIGNAL) {
+    if (msgType != MESSAGE_METHOD_CALL) {
         /* We are still holding the lock */
         lock.Unlock(MUTEX_CONTEXT);
         return ER_BUS_DESTINATION_NOT_AUTHENTICATED;
@@ -907,8 +907,8 @@ QStatus AllJoynPeerObj::DispatchRequest(Message& msg, RequestType reqType, const
     lock.Lock(MUTEX_CONTEXT);
     if (dispatcher.IsRunning()) {
         Request* req = new Request(msg, reqType, data);
-        Alarm alarm(0, this, 0, reinterpret_cast<void*>(req));
-        status = dispatcher.AddAlarm(alarm);
+        qcc::AlarmListener* alljoynPeerListener = this;
+        status = dispatcher.AddAlarm(Alarm(alljoynPeerListener, req));
         if (status != ER_OK) {
             delete req;
         }
@@ -924,7 +924,7 @@ void AllJoynPeerObj::AlarmTriggered(const Alarm& alarm, QStatus reason)
     QStatus status;
 
     QCC_DbgHLPrintf(("AllJoynPeerObj::AlarmTriggered"));
-    Request* req = static_cast<Request*>(alarm.GetContext());
+    Request* req = static_cast<Request*>(alarm->GetContext());
 
     switch (req->reqType) {
     case AUTHENTICATE_PEER:
@@ -936,10 +936,10 @@ void AllJoynPeerObj::AlarmTriggered(const Alarm& alarm, QStatus reason)
         msgsPendingAuth.push_back(req->msg);
         lock.Unlock(MUTEX_CONTEXT);
         /*
-         * Extend timeouts so reply handlers don't expire while waiting for authentication to complete
+         * Pause timeouts so reply handlers don't expire while waiting for authentication to complete
          */
         if (req->msg->GetType() == MESSAGE_METHOD_CALL) {
-            bus.GetInternal().GetLocalEndpoint().ExtendReplyHandlerTimeout(req->msg->GetCallSerial(), AUTH_TIMEOUT);
+            bus.GetInternal().GetLocalEndpoint().PauseReplyHandlerTimeout(req->msg);
         }
         status = AuthenticatePeer(req->msg->GetType(), req->msg->GetDestination(), false);
         if (status != ER_WOULDBLOCK) {
@@ -963,6 +963,9 @@ void AllJoynPeerObj::AlarmTriggered(const Alarm& alarm, QStatus reason)
                             bus.GetInternal().GetLocalEndpoint().PushMessage(reply);
                         }
                     } else {
+                        if (msg->GetType() == MESSAGE_METHOD_CALL) {
+                            bus.GetInternal().GetLocalEndpoint().ResumeReplyHandlerTimeout(msg);
+                        }
                         bus.GetInternal().GetRouter().PushMessage(msg, bus.GetInternal().GetLocalEndpoint());
                     }
                     iter = msgsPendingAuth.erase(iter);
@@ -984,20 +987,12 @@ void AllJoynPeerObj::AlarmTriggered(const Alarm& alarm, QStatus reason)
         AuthAdvance(req->msg);
         break;
 
-    case ACCEPT_SESSION:
-        AcceptSession(NULL, req->msg);
-        break;
-
-    case SESSION_JOINED:
-        SessionJoined(NULL, NULL, req->msg);
-        break;
-
     case EXPAND_HEADER:
         ExpandHeader(req->msg, req->data);
         break;
 
     case SECURE_CONNECTION:
-        status = AuthenticatePeer(req->msg->GetType(), req->data, true);
+        status = AuthenticatePeer(MESSAGE_METHOD_CALL, req->data, true);
         if (status != ER_OK) {
             peerAuthListener.SecurityViolation(status, req->msg);
         }
@@ -1065,29 +1060,6 @@ void AllJoynPeerObj::NameOwnerChanged(const char* busName, const char* previousO
 void AllJoynPeerObj::AcceptSession(const InterfaceDescription::Member* member, Message& msg)
 {
     QStatus status;
-
-    if (member) {
-        /*
-         * Reenter on the BusAttachment dispatcher thread.
-         */
-        lock.Lock(MUTEX_CONTEXT);
-        if (dispatcher.IsRunning()) {
-            Request* req = new Request(msg, ACCEPT_SESSION, "");
-            Alarm alarm(0, this, 0, reinterpret_cast<void*>(req));
-            status = dispatcher.AddAlarm(alarm);
-            if (status != ER_OK) {
-                delete req;
-            }
-        } else {
-            status = ER_BUS_STOPPING;
-        }
-        lock.Unlock(MUTEX_CONTEXT);
-        if (status != ER_OK) {
-            MethodReply(msg, status);
-        }
-        return;
-    }
-
     size_t numArgs;
     const MsgArg* args;
 
@@ -1132,26 +1104,6 @@ void AllJoynPeerObj::AcceptSession(const InterfaceDescription::Member* member, M
 void AllJoynPeerObj::SessionJoined(const InterfaceDescription::Member* member, const char* srcPath, Message& msg)
 {
     // dispatch to the dispatcher thread
-    QStatus status;
-    if (member) {
-        lock.Lock(MUTEX_CONTEXT);
-        if (dispatcher.IsRunning()) {
-            Request* req = new Request(msg, SESSION_JOINED, "");
-            Alarm alarm(0, this, 0, reinterpret_cast<void*>(req));
-            status = dispatcher.AddAlarm(alarm);
-            if (status != ER_OK) {
-                delete req;
-            }
-        } else {
-            status = ER_BUS_STOPPING;
-        }
-        lock.Unlock(MUTEX_CONTEXT);
-        if (status != ER_OK) {
-            MethodReply(msg, status);
-        }
-        return;
-    }
-
     size_t numArgs;
     const MsgArg* args;
 

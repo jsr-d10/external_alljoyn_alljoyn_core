@@ -62,7 +62,6 @@ QStatus XmlHelper::ParseInterface(const XmlElement* elem, ProxyBusObject* obj)
     }
 
     /* Get "secure" annotation */
-    // TODO Think problem is here
     bool secure = false;
     vector<XmlElement*>::const_iterator ifIt = elem->GetChildren().begin();
     while (ifIt != elem->GetChildren().end()) {
@@ -91,8 +90,9 @@ QStatus XmlHelper::ParseInterface(const XmlElement* elem, ProxyBusObject* obj)
                 bool isFirstArg = true;
                 qcc::String inSig;
                 qcc::String outSig;
-                qcc::String argList;
-                uint8_t annotations = 0;
+                qcc::String argNames;
+                bool isArgNamesEmpty = true;
+                std::map<String, String> annotations;
 
                 /* Iterate over member children */
                 const vector<XmlElement*>& argChildren = ifChildElem->GetChildren();
@@ -101,7 +101,7 @@ QStatus XmlHelper::ParseInterface(const XmlElement* elem, ProxyBusObject* obj)
                     const XmlElement* argElem = *argIt++;
                     if (argElem->GetName() == "arg") {
                         if (!isFirstArg) {
-                            argList += ',';
+                            argNames += ',';
                         }
                         isFirstArg = false;
                         const qcc::String& typeAtt = argElem->GetAttribute("type");
@@ -112,7 +112,12 @@ QStatus XmlHelper::ParseInterface(const XmlElement* elem, ProxyBusObject* obj)
                             break;
                         }
 
-                        argList += argElem->GetAttribute("name");
+                        const qcc::String& nameAtt = argElem->GetAttribute("name");
+                        if (!nameAtt.empty()) {
+                            isArgNamesEmpty = false;
+                            argNames += nameAtt;
+                        }
+
                         if (isSignal || (argElem->GetAttribute("direction") == "in")) {
                             inSig += typeAtt;
                         } else {
@@ -121,12 +126,7 @@ QStatus XmlHelper::ParseInterface(const XmlElement* elem, ProxyBusObject* obj)
                     } else if (argElem->GetName() == "annotation") {
                         const qcc::String& nameAtt = argElem->GetAttribute("name");
                         const qcc::String& valueAtt = argElem->GetAttribute("value");
-
-                        if (nameAtt == org::freedesktop::DBus::AnnotateDeprecated && valueAtt == "true") {
-                            annotations |= MEMBER_ANNOTATE_DEPRECATED;
-                        } else if (nameAtt == org::freedesktop::DBus::AnnotateNoReply && valueAtt == "true") {
-                            annotations |= MEMBER_ANNOTATE_NO_REPLY;
-                        }
+                        annotations[nameAtt] = valueAtt;
                     }
                 }
 
@@ -136,8 +136,11 @@ QStatus XmlHelper::ParseInterface(const XmlElement* elem, ProxyBusObject* obj)
                                             memberName.c_str(),
                                             inSig.c_str(),
                                             outSig.c_str(),
-                                            argList.c_str(),
-                                            annotations);
+                                            isArgNamesEmpty ? NULL : argNames.c_str());
+
+                    for (std::map<String, String>::const_iterator it = annotations.begin(); it != annotations.end(); ++it) {
+                        intf.AddMemberAnnotation(memberName.c_str(), it->first, it->second);
+                    }
                 }
             } else {
                 status = ER_BUS_BAD_MEMBER_NAME;
@@ -158,8 +161,18 @@ QStatus XmlHelper::ParseInterface(const XmlElement* elem, ProxyBusObject* obj)
                 if (accessStr == "write") access = PROP_ACCESS_WRITE;
                 if (accessStr == "readwrite") access = PROP_ACCESS_RW;
                 status = intf.AddProperty(memberName.c_str(), sig.c_str(), access);
+
+                // add Property annotations
+                const vector<XmlElement*>& argChildren = ifChildElem->GetChildren();
+                vector<XmlElement*>::const_iterator argIt = argChildren.begin();
+                while ((ER_OK == status) && (argIt != argChildren.end())) {
+                    const XmlElement* argElem = *argIt++;
+                    status = intf.AddPropertyAnnotation(memberName, argElem->GetAttribute("name"), argElem->GetAttribute("value"));
+                }
             }
-        } else if (ifChildName != "annotation") {
+        } else if (ifChildName == "annotation") {
+            status = intf.AddAnnotation(ifChildElem->GetAttribute("name"), ifChildElem->GetAttribute("value"));
+        } else {
             status = ER_FAIL;
             QCC_LogError(status, ("Unknown element \"%s\" found in introspection data from %s", ifChildName.c_str(), ident));
             break;

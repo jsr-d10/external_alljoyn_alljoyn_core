@@ -28,6 +28,7 @@
 #include <qcc/Logger.h>
 #include <qcc/String.h>
 #include <qcc/Util.h>
+#include <qcc/atomic.h>
 
 #include <Status.h>
 
@@ -44,11 +45,19 @@ using namespace qcc;
 namespace ajn {
 
 
-DaemonRouter::DaemonRouter() : localEndpoint(NULL), ruleTable(), nameTable(), busController(NULL)
+DaemonRouter::DaemonRouter() : endpointRefs(0), localEndpoint(NULL), closing(false), ruleTable(), nameTable(), busController(NULL)
 {
 }
 
-static QStatus SendThroughEndpoint(Message& msg, BusEndpoint& ep, SessionId sessionId)
+DaemonRouter::~DaemonRouter()
+{
+    closing = true;
+    while (endpointRefs) {
+        qcc::Sleep(1);
+    }
+}
+
+static inline QStatus SendThroughEndpoint(Message& msg, BusEndpoint& ep, SessionId sessionId)
 {
     QStatus status;
     if ((sessionId != 0) && (ep.GetEndpointType() == BusEndpoint::ENDPOINT_TYPE_VIRTUAL)) {
@@ -56,7 +65,7 @@ static QStatus SendThroughEndpoint(Message& msg, BusEndpoint& ep, SessionId sess
     } else {
         status = ep.PushMessage(msg);
     }
-    if (status != ER_OK) {
+    if ((status != ER_OK) && (status != ER_BUS_ENDPOINT_CLOSING)) {
         QCC_LogError(status, ("SendThroughEndpoint(dest=%s, ep=%s, id=%u) failed", msg->GetDestination(), ep.GetUniqueName().c_str(), sessionId));
     }
     return status;
@@ -64,12 +73,29 @@ static QStatus SendThroughEndpoint(Message& msg, BusEndpoint& ep, SessionId sess
 
 QStatus DaemonRouter::PushMessage(Message& msg, BusEndpoint& origSender)
 {
+    /*
+     * Reference count protects local endpoint from being deregistered while in use.
+     */
+    IncrementAndFetch(&endpointRefs);
+    if (closing) {
+        DecrementAndFetch(&endpointRefs);
+        return ER_BUS_ENDPOINT_CLOSING;
+    }
+    assert(localEndpoint);
+
     QStatus status = ER_OK;
     BusEndpoint* sender = &origSender;
     bool replyExpected = (msg->GetType() == MESSAGE_METHOD_CALL) && ((msg->GetFlags() & ALLJOYN_FLAG_NO_REPLY_EXPECTED) == 0);
-
     const char* destination = msg->GetDestination();
     SessionId sessionId = msg->GetSessionId();
+
+    /*
+     * If the message originated at the local endpoint check if the serial number needs to be
+     * updated before queuing the message on a remote endpoint.
+     */
+    if (&origSender == localEndpoint) {
+        localEndpoint->UpdateSerialNumber(msg);
+    }
 
     bool destinationEmpty = destination[0] == '\0';
     if (!destinationEmpty) {
@@ -91,16 +117,10 @@ QStatus DaemonRouter::PushMessage(Message& msg, BusEndpoint& origSender)
                     msg->ErrorMsg(msg, "org.alljoyn.Bus.Blocked", "Method reply would be blocked because caller does not allow remote messages");
                     PushMessage(msg, *localEndpoint);
                 } else {
-                    BusEndpoint::EndpointType epType = destEndpoint->GetEndpointType();
-                    RemoteEndpoint* protectEp = (epType == BusEndpoint::ENDPOINT_TYPE_REMOTE) || (epType == BusEndpoint::ENDPOINT_TYPE_BUS2BUS) ? static_cast<RemoteEndpoint*>(destEndpoint) : NULL;
-                    if (protectEp) {
-                        protectEp->IncrementWaiters();
-                    }
+                    destEndpoint->IncrementPushCount();
                     nameTable.Unlock();
                     status = SendThroughEndpoint(msg, *destEndpoint, sessionId);
-                    if (protectEp) {
-                        protectEp->DecrementWaiters();
-                    }
+                    destEndpoint->DecrementPushCount();
                     nameTable.Lock();
                 }
             } else {
@@ -160,18 +180,12 @@ QStatus DaemonRouter::PushMessage(Message& msg, BusEndpoint& origSender)
                  * forward the message, otherwise silently ignore it.
                  */
                 if (!((sender->GetEndpointType() == BusEndpoint::ENDPOINT_TYPE_BUS2BUS) && !dest->AllowRemoteMessages())) {
-                    BusEndpoint::EndpointType epType = dest->GetEndpointType();
-                    RemoteEndpoint* protectEp = (epType == BusEndpoint::ENDPOINT_TYPE_REMOTE) || (epType == BusEndpoint::ENDPOINT_TYPE_BUS2BUS) ? static_cast<RemoteEndpoint*>(dest) : NULL;
-                    if (protectEp) {
-                        protectEp->IncrementWaiters();
-                    }
+                    dest->IncrementPushCount();
                     ruleTable.Unlock();
                     nameTable.Unlock();
                     QStatus tStatus = SendThroughEndpoint(msg, *dest, sessionId);
                     status = (status == ER_OK) ? tStatus : status;
-                    if (protectEp) {
-                        protectEp->DecrementWaiters();
-                    }
+                    dest->DecrementPushCount();
                     nameTable.Lock();
                     ruleTable.Lock();
                 }
@@ -191,17 +205,11 @@ QStatus DaemonRouter::PushMessage(Message& msg, BusEndpoint& origSender)
             while (it != m_b2bEndpoints.end()) {
                 RemoteEndpoint* ep = *it;
                 if (ep != &origSender) {
-                    BusEndpoint::EndpointType epType = ep->GetEndpointType();
-                    RemoteEndpoint* protectEp = (epType == BusEndpoint::ENDPOINT_TYPE_REMOTE) || (epType == BusEndpoint::ENDPOINT_TYPE_BUS2BUS) ? static_cast<RemoteEndpoint*>(ep) : NULL;
-                    if (protectEp) {
-                        protectEp->IncrementWaiters();
-                    }
+                    ep->IncrementPushCount();
                     m_b2bEndpointsLock.Unlock(MUTEX_CONTEXT);
                     QStatus tStatus = SendThroughEndpoint(msg, *ep, sessionId);
                     status = (status == ER_OK) ? tStatus : status;
-                    if (protectEp) {
-                        protectEp->DecrementWaiters();
-                    }
+                    ep->DecrementPushCount();
                     m_b2bEndpointsLock.Lock(MUTEX_CONTEXT);
                     it = m_b2bEndpoints.lower_bound(ep);
                 }
@@ -224,17 +232,12 @@ QStatus DaemonRouter::PushMessage(Message& msg, BusEndpoint& origSender)
             if (!sit->b2bEp || (sit->b2bEp != lastB2b)) {
                 lastB2b = sit->b2bEp;
                 SessionCastEntry entry = *sit;
-                BusEndpoint::EndpointType epType = sit->destEp->GetEndpointType();
-                RemoteEndpoint* protectEp = (epType == BusEndpoint::ENDPOINT_TYPE_REMOTE) || (epType == BusEndpoint::ENDPOINT_TYPE_BUS2BUS) ? static_cast<RemoteEndpoint*>(sit->destEp) : NULL;
-                if (protectEp) {
-                    protectEp->IncrementWaiters();
-                }
+                BusEndpoint*ep = sit->destEp;
+                ep->IncrementPushCount();
                 sessionCastSetLock.Unlock(MUTEX_CONTEXT);
-                QStatus tStatus = SendThroughEndpoint(msg, *sit->destEp, sessionId);
+                QStatus tStatus = SendThroughEndpoint(msg, *ep, sessionId);
                 status = (status == ER_OK) ? tStatus : status;
-                if (protectEp) {
-                    protectEp->DecrementWaiters();
-                }
+                ep->DecrementPushCount();
                 sessionCastSetLock.Lock(MUTEX_CONTEXT);
                 sit = sessionCastSet.lower_bound(entry);
             }
@@ -244,6 +247,8 @@ QStatus DaemonRouter::PushMessage(Message& msg, BusEndpoint& origSender)
         }
         sessionCastSetLock.Unlock(MUTEX_CONTEXT);
     }
+
+    DecrementAndFetch(&endpointRefs);
     return status;
 }
 
@@ -307,7 +312,7 @@ QStatus DaemonRouter::RegisterEndpoint(BusEndpoint& endpoint, bool isLocal)
 
     /* Notify local endpoint that it is connected */
     if (&endpoint == localEndpoint) {
-        localEndpoint->BusIsConnected();
+        localEndpoint->OnBusConnected();
     }
 
     return status;
@@ -363,13 +368,19 @@ void DaemonRouter::UnregisterEndpoint(BusEndpoint& endpoint)
         /* Remove endpoint from names and rules */
         nameTable.RemoveUniqueName(uniqueName);
         RemoveAllRules(endpoint);
-#if defined(QCC_OS_ANDROID)
-        PermissionDB::GetDB().RemovePermissionCache(endpoint);
-#endif
+        PermissionMgr::CleanPermissionCache(endpoint);
     }
-
-    /* Unregister static endpoints */
+    /*
+     * If the local endpoint is being deregistered this indicates the router is being shut down.
+     */
     if (&endpoint == localEndpoint) {
+        closing = true;
+        /*
+         * Wait until there are no pushes in progress.
+         */
+        while (endpointRefs) {
+            qcc::Sleep(1);
+        }
         localEndpoint = NULL;
     }
 }

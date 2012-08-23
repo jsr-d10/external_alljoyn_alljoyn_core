@@ -28,8 +28,9 @@
 #include <qcc/String.h>
 #include <qcc/StringSource.h>
 #include <qcc/StringUtil.h>
-#include <qcc/FileStream.h>
 #include <qcc/Mutex.h>
+#include <qcc/Thread.h>
+#include <qcc/FileStream.h>
 
 #include <alljoyn/BusAttachment.h>
 
@@ -42,7 +43,7 @@
 #include "TCPTransport.h"
 #include "NullTransport.h"
 
-#if defined(QCC_OS_ANDROID) || defined(QCC_OS_LINUX)
+#if defined(QCC_OS_ANDROID) || defined(QCC_OS_LINUX) || defined(QCC_OS_DARWIN) || defined(QCC_OS_WINRT)
 #include "DaemonICETransport.h"
 #endif
 
@@ -56,7 +57,6 @@ static const char bundledConfig[] =
     "<busconfig>"
     "  <type>alljoyn_bundled</type>"
     "  <listen>tcp:addr=0.0.0.0,port=0,family=ipv4</listen>"
-    "  <listen>ice:</listen>"
     "  <limit name=\"auth_timeout\">5000</limit>"
     "  <limit name=\"max_incomplete_connections_tcp\">4</limit>"
     "  <limit name=\"max_completed_connections_tcp\">16</limit>"
@@ -66,6 +66,8 @@ static const char bundledConfig[] =
     "    <property enable_ipv4=\"true\"/>"
     "    <property enable_ipv6=\"true\"/>"
     "  </ip_name_service>"
+#if defined(QCC_OS_ANDROID) || defined(QCC_OS_LINUX) || defined(QCC_OS_DARWIN) || defined(QCC_OS_WINRT)
+    "  <listen>ice:</listen>"
     "  <ice>"
     "    <limit name=\"max_incomplete_connections\">16</limit>"
     "    <limit name=\"max_completed_connections\">64</limit>"
@@ -76,6 +78,7 @@ static const char bundledConfig[] =
     "    <property protocol=\"HTTPS\"/>"
     "    <property enable_ipv6=\"false\"/>"
     "  </ice_discovery_manager>"
+#endif
     "</busconfig>";
 
 class BundledDaemon : public DaemonLauncher, public TransportFactoryContainer {
@@ -94,7 +97,7 @@ class BundledDaemon : public DaemonLauncher, public TransportFactoryContainer {
     /**
      * Terminate the bundled daemon
      */
-    QStatus Stop();
+    QStatus Stop(NullTransport* nullTransport);
 
     /**
      * Wait for bundled daemon to exit
@@ -104,12 +107,11 @@ class BundledDaemon : public DaemonLauncher, public TransportFactoryContainer {
   private:
 
     bool transportsInitialized;
-    volatile int32_t refCount;
+    bool stopping;
     Bus* ajBus;
     BusController* ajBusController;
     Mutex lock;
-    volatile bool safeToShutdown;
-
+    std::set<NullTransport*> transports;
 };
 
 bool ExistFile(const char* fileName) {
@@ -123,47 +125,115 @@ bool ExistFile(const char* fileName) {
 
 /*
  * Create the singleton bundled daemon instance.
+ *
+ * Sidebar on starting a bundled daemon
+ * ====================================
+ *
+ * How this works is via a fairly non-obvious mechanism, so we describe the
+ * process here.  If it is desired to use the bundled daemon, the user (for
+ * example bbclient or bbservice) includes this compilation unit.  Since the
+ * following defines a C++ static initializer, an instance of the BundledDaemon
+ * object will be created before any call into a function in this file.  In
+ * Linux, for example, this happens as a result of _init() being called before
+ * the main() function of the program using the bundled daemon.  _init() loops
+ * through the list of compilation units in link order and will eventually call
+ * out to BundledDaemon.cc:__static_initialization_and_destruction_0().  This is
+ * the initializer function for this file which will then calls the constructor
+ * for the BundledDaemon object.  The constructor calls into a static method
+ * (RegisterDaemonLauncher) of the NullTransport to register itself as the
+ * daemon to be launched.  This sets the stage for the use of the bundled
+ * daemon.
+ *
+ * When the program using the bundled daemon tries to connect to a bus
+ * attachment it calls BusAttachment::Connect().  This tries to connect to an
+ * existing daemon first and if that connect does not succeed, it tries to
+ * connect over the NullTransport to the bundled daemon.
+ *
+ * The NullTransport::Connect() method looks to see if it (the null transport)
+ * is running, and if it is not it looks to see if it has a daemonLauncher.
+ * Recall that the constructor for the BundledDaemon object registered itself as
+ * a daemon launcher, so the null transport will find the launcher since it
+ * included the object file corresponding to this source.  The null transport
+ * then does a daemonLauncher->Start() which calls back into the bundled daemon
+ * object BundledDaemon::Start() method below, providing the daemon with the
+ * NullTransport pointer.  The Start() method brings up the bundled daemon and
+ * links the daemon to the bus attachment using the provided null transport.
+ *
+ * So to summarize, one uses the bundled daemon simply by linking to the object
+ * file corresponding to this source file.  This automagically creates a bundled
+ * daemon static object and registers it with the null transport.  When trying
+ * to connect to a daemon using a bus attachment in the usual way, if there is
+ * no currently running native daemon process, the bus attachment will
+ * automagically try to connect to a registered bundled daemon using the null
+ * transport.  This will start the bundled daemon and then connect to it.
+ *
+ * The client uses the bundled daemon transparently -- it only has to link to it.
+ *
+ * Stopping the bundled daemon happens in the destructor for the C++ static
+ * global object, again transparently to the client.
+ *
+ * It's pretty magical.
  */
 static BundledDaemon bundledDaemon;
 
-BundledDaemon::BundledDaemon() : transportsInitialized(false), refCount(0), ajBus(NULL), ajBusController(NULL), safeToShutdown(true)
+BundledDaemon::BundledDaemon() : transportsInitialized(false), stopping(false), ajBus(NULL), ajBusController(NULL)
 {
     NullTransport::RegisterDaemonLauncher(this);
 }
 
 BundledDaemon::~BundledDaemon()
 {
-    while (safeToShutdown == false) {
-        qcc::Sleep(2);
+    QCC_DbgPrintf(("BundledDaemon::~BundledDaemon"));
+    lock.Lock(MUTEX_CONTEXT);
+    while (!transports.empty()) {
+        set<NullTransport*>::iterator iter = transports.begin();
+        NullTransport* trans = *iter;
+        transports.erase(iter);
+        lock.Unlock(MUTEX_CONTEXT);
+        trans->Disconnect("null:");
+        lock.Lock(MUTEX_CONTEXT);
     }
+    lock.Unlock(MUTEX_CONTEXT);
+    Join();
 }
 
 QStatus BundledDaemon::Start(NullTransport* nullTransport)
 {
     QStatus status = ER_OK;
-    printf("BundledDaemon::Start\n");
+
+    printf("Using BundledDaemon\n");
 
     /*
-     * Need a mutex around this to prevent *more than one BusAttachment from bringing up the
-     * bundled daemon at the same time we need to serialize the operation.
+     * If the bundled daemon is in the process of stopping we need to wait until the operation is
+     * complete (BundledDaemon::Join has exited) before we attempt to start up again.
      */
-    lock.Lock();
-
-    safeToShutdown = false;
-    if (IncrementAndFetch(&refCount) == 1) {
+    lock.Lock(MUTEX_CONTEXT);
+    while (stopping) {
+        if (!transports.empty()) {
+            assert(transports.empty());
+        }
+        lock.Unlock(MUTEX_CONTEXT);
+        qcc::Sleep(5);
+        lock.Lock(MUTEX_CONTEXT);
+    }
+    if (transports.empty()) {
+#if defined(QCC_OS_ANDROID)
+        LoggerSetting::GetLoggerSetting("bundled-daemon", LOG_DEBUG, true, NULL);
+#else
         LoggerSetting::GetLoggerSetting("bundled-daemon", LOG_DEBUG, false, stdout);
+#endif
+
         /*
          * Load the configuration
          */
         DaemonConfig* config = NULL;
-        bool useInternal = true;
 #ifndef NDEBUG
         qcc::String configFile = qcc::String::Empty;
     #if defined(QCC_OS_ANDROID)
         configFile = "/mnt/sdcard/.alljoyn/config.xml";
     #endif
 
-    #if defined(QCC_OS_LINUX) || defined(QCC_OS_WINDOWS)
+    #if defined(QCC_OS_LINUX) || defined(QCC_OS_GROUP_WINDOWS) || defined(QCC_OS_GROUP_WINRT)
         configFile = "./config.xml";
     #endif
 
@@ -171,14 +241,21 @@ QStatus BundledDaemon::Start(NullTransport* nullTransport)
             FileSource fs(configFile);
             if (fs.IsValid()) {
                 config = DaemonConfig::Load(fs);
-                if (config) {
-                    useInternal = false;
+                if (!config) {
+                    status = ER_BUS_BAD_XML;
+                    QCC_LogError(status, ("Error parsing configuration from %s", configFile.c_str()));
+                    goto ErrorExit;
                 }
             }
         }
 #endif
-        if (useInternal) {
+        if (!config) {
             config = DaemonConfig::Load(bundledConfig);
+        }
+        if (!config) {
+            status = ER_BUS_BAD_XML;
+            QCC_LogError(status, ("Error parsing configuration"));
+            goto ErrorExit;
         }
         /*
          * Extract the listen specs
@@ -188,14 +265,18 @@ QStatus BundledDaemon::Start(NullTransport* nullTransport)
         /*
          * Register the transport factories - this is a one time operation
          */
-        TransportFactoryContainer cntr;
-        cntr.Add(new TransportFactory<TCPTransport>(TCPTransport::TransportName, false));
-
-#if defined(QCC_OS_ANDROID) || defined(QCC_OS_LINUX)
-        cntr.Add(new TransportFactory<DaemonICETransport>(DaemonICETransport::TransportName, false));
+        if (!transportsInitialized) {
+            Add(new TransportFactory<TCPTransport>(TCPTransport::TransportName, false));
+#if defined(QCC_OS_ANDROID) || defined(QCC_OS_LINUX) || defined(QCC_OS_DARWIN) || defined(QCC_OS_WINRT)
+            Add(new TransportFactory<DaemonICETransport>(DaemonICETransport::TransportName, false));
 #endif
-
-        ajBus = new Bus("bundled-daemon", cntr, listenSpecs.c_str());
+            transportsInitialized = true;
+        }
+        QCC_DbgPrintf(("Starting bundled daemon bus attachment"));
+        /*
+         * Create and start the daemon
+         */
+        ajBus = new Bus("bundled-daemon", *this, listenSpecs.c_str());
         ajBusController = new BusController(*ajBus);
         status = ajBusController->Init(listenSpecs);
         if (ER_OK != status) {
@@ -210,54 +291,58 @@ QStatus BundledDaemon::Start(NullTransport* nullTransport)
         goto ErrorExit;
     }
 
-    lock.Unlock();
-    printf("BundledDaemon::Start exit OK\n");
+    transports.insert(nullTransport);
+
+    lock.Unlock(MUTEX_CONTEXT);
     return ER_OK;
 
 ErrorExit:
 
-    if (DecrementAndFetch(&refCount) == 0) {
+    if (transports.empty()) {
         delete ajBusController;
         ajBusController = NULL;
         delete ajBus;
         ajBus = NULL;
-        safeToShutdown = true;
     }
-    lock.Unlock();
-    printf("BundledDaemon::Start exit %s\n", QCC_StatusText(status));
+    lock.Unlock(MUTEX_CONTEXT);
     return status;
 }
 
 void BundledDaemon::Join()
 {
-    printf("BundledDaemon::Join\n");
-    lock.Lock();
-    if (refCount == 0) {
-        if (ajBus) {
-            ajBus->Join();
-        }
+    QCC_DbgPrintf(("BundledDaemon::Join"));
+    lock.Lock(MUTEX_CONTEXT);
+    if (transports.empty() && ajBus) {
+        QCC_DbgPrintf(("Joining bundled daemon bus attachment"));
         delete ajBusController;
         ajBusController = NULL;
         delete ajBus;
         ajBus = NULL;
+        /*
+         * Clear the stopping state
+         */
+        stopping = false;
     }
-    lock.Unlock();
-
-    if (refCount == 0) {
-        safeToShutdown = true;
-    }
+    lock.Unlock(MUTEX_CONTEXT);
 }
 
-QStatus BundledDaemon::Stop()
+QStatus BundledDaemon::Stop(NullTransport* nullTransport)
 {
-    printf("BundledDaemon::Stop\n");
-    lock.Lock();
-    int32_t rc = DecrementAndFetch(&refCount);
+    QCC_DbgPrintf(("BundledDaemon::Stop"));
+    lock.Lock(MUTEX_CONTEXT);
+    transports.erase(nullTransport);
     QStatus status = ER_OK;
-    assert(rc >= 0);
-    if (rc == 0 && ajBus) {
-        status = ajBus->Stop();
+    if (transports.empty()) {
+        /*
+         * Set the stopping state to block any calls to Start until
+         * after Join() has been called.
+         */
+        stopping = true;
+        if (ajBus) {
+            status = ajBus->Stop();
+        }
     }
-    lock.Unlock();
+    lock.Unlock(MUTEX_CONTEXT);
     return status;
 }
+

@@ -80,6 +80,26 @@ class BusObject : public MessageReceiver {
      */
     virtual ~BusObject();
 
+    /**
+     * Emit PropertiesChanged to signal the bus that this property has been updated
+     *
+     *  This is protected because JNI needs to be able to call it
+     *
+     * @param ifcName   The name of the interface
+     * @param propName  The name of the property being changed
+     * @param val       The new value of the property
+     * @param id        ID of the session we broadcast the signal to (0 for all)
+     */
+    void EmitPropChanged(const char* ifcName, const char* propName, MsgArg& val, SessionId id);
+
+    /**
+     * Get a reference to the underlying BusAttachment
+     *
+     * @return a reference to the BusAttachment
+     */
+    const BusAttachment& GetBusAttachment() const
+    { return bus; }
+
   protected:
 
     /**

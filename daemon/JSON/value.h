@@ -10,6 +10,22 @@
  *
  ******************************************************************************/
 
+/******************************************************************************
+ * Copyright 2012, Qualcomm Innovation Center, Inc.
+ *
+ *    Licensed under the Apache License, Version 2.0 (the "License");
+ *    you may not use this file except in compliance with the License.
+ *    You may obtain a copy of the License at
+ *
+ *        http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *    Unless required by applicable law or agreed to in writing, software
+ *    distributed under the License is distributed on an "AS IS" BASIS,
+ *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *    See the License for the specific language governing permissions and
+ *    limitations under the License.
+ ******************************************************************************/
+
 #ifndef CPPTL_JSON_H_INCLUDED
 # define CPPTL_JSON_H_INCLUDED
 
@@ -514,27 +530,10 @@ class Path {
     Args args_;
 };
 
-/** \brief Experimental do not use: Allocator to customize member name and string value memory management done by Value.
- *
- * - makeMemberName() and releaseMemberName() are called to respectively duplicate and
- *   free an Json::objectValue member name.
- * - duplicateStringValue() and releaseStringValue() are called similarly to
- *   duplicate and free a Json::stringValue value.
- */
-class ValueAllocator {
-  public:
-    enum { unknown = (unsigned)-1 };
-
-    virtual ~ValueAllocator();
-
-    virtual char*makeMemberName(const char*memberName) = 0;
-    virtual void releaseMemberName(char*memberName) = 0;
-    virtual char*duplicateStringValue(const char*value,
-                                      unsigned int length = unknown) = 0;
-    virtual void releaseStringValue(char*value) = 0;
-};
-
 #ifdef JSON_VALUE_USE_INTERNAL_MAP
+
+#error no
+
 /** \brief Allocator to customize Value internal map.
  * Below is an example of a simple implementation (default implementation actually
  * use memory pool for speed).

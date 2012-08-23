@@ -27,7 +27,9 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
+#if !defined(QCC_OS_IPHONE)
 #include <netinet/udp.h>
+#endif
 #include <arpa/inet.h>
 #include <errno.h>
 #include <assert.h>
@@ -35,11 +37,31 @@
 #include <qcc/Event.h>
 #include <qcc/Debug.h>
 #include <alljoyn/version.h>
-#include <qcc/ScatterGatherList.h>
+#include "ScatterGatherList.h"
 #include "ICECandidatePair.h"
 #include "Stun.h"
 #include "ICEPacketStream.h"
 
+#if defined(QCC_OS_DARWIN)
+
+#define iphdr ip
+
+#endif
+
+#if defined(QCC_OS_IPHONE)
+
+/*
+ * Udp protocol header.
+ * Per RFC 768, September, 1981.
+ */
+struct udphdr {
+    u_short uh_sport;                   /* source port */
+    u_short uh_dport;                   /* destination port */
+    u_short uh_ulen;                    /* udp length */
+    u_short uh_sum;                     /* udp checksum */
+};
+
+#endif
 
 #define QCC_MODULE "PACKET"
 

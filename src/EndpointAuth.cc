@@ -59,9 +59,8 @@ QStatus EndpointAuth::Hello(qcc::String& redirection)
     QStatus status;
     Message hello(bus);
     Message response(bus);
-    uint32_t serial;
 
-    status = hello->HelloMessage(endpoint.features.isBusToBus, endpoint.features.allowRemote, serial);
+    status = hello->HelloMessage(endpoint.features.isBusToBus, endpoint.features.allowRemote);
     if (status != ER_OK) {
         return status;
     }
@@ -83,7 +82,7 @@ QStatus EndpointAuth::Hello(qcc::String& redirection)
             return status;
         }
         qcc::String msg;
-        if (strcmp(response->GetErrorName(&msg), RedirectError) == 0) {
+        if (response->GetErrorName(&msg) != NULL && strcmp(response->GetErrorName(&msg), RedirectError) == 0) {
             QCC_DbgPrintf(("Endpoint redirected: %s", msg.c_str()));
             redirection = msg;
             return ER_BUS_ENDPOINT_REDIRECTED;
@@ -96,7 +95,7 @@ QStatus EndpointAuth::Hello(qcc::String& redirection)
     if (response->GetType() != MESSAGE_METHOD_RET) {
         return ER_BUS_ESTABLISH_FAILED;
     }
-    if (response->GetReplySerial() != serial) {
+    if (response->GetReplySerial() != hello->GetCallSerial()) {
         return ER_BUS_UNKNOWN_SERIAL;
     }
     /*
@@ -275,7 +274,7 @@ qcc::String EndpointAuth::SASLCallout(SASLEngine& sasl, const qcc::String& extCm
         // step 1: client receives empty command and replies with "NEGOTIATE_UNIX_FD [<pid>]"
         if (extCmd.empty() && endpoint.features.handlePassing) {
             rsp = NegotiateUnixFd;
-#ifdef QCC_OS_WINDOWS
+#ifdef QCC_OS_GROUP_WINDOWS
             rsp += " " + qcc::U32ToString(qcc::GetPid());
 #endif
             endpoint.features.handlePassing = false;
@@ -299,7 +298,7 @@ qcc::String EndpointAuth::SASLCallout(SASLEngine& sasl, const qcc::String& extCm
         // step 2: daemon receives "NEGOTIATE_UNIX_FD [<pid>]", sets options, and replies with "AGREE_UNIX_FD [<pid>]"
         if (extCmd.find(NegotiateUnixFd) == 0) {
             rsp = AgreeUnixFd;
-#ifdef QCC_OS_WINDOWS
+#ifdef QCC_OS_GROUP_WINDOWS
             rsp += " " + qcc::U32ToString(qcc::GetPid());
 #endif
             endpoint.features.handlePassing = true;

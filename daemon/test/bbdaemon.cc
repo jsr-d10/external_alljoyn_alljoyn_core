@@ -41,7 +41,7 @@
 
 #if defined(QCC_OS_DARWIN)
 #warning "Bluetooth transport not implemented on Darwin"
-#elif defined(QCC_OS_WINDOWS)
+#elif defined(QCC_OS_GROUP_WINDOWS)
 //warning "Bluetooth transport currently not supported on Windows"
 #else
 #include "BTTransport.h"
@@ -393,6 +393,9 @@ int main(int argc, char** argv)
     /* Install SIGINT handler */
     signal(SIGINT, SigIntHandler);
 
+    /* Load the configuration information */
+    DaemonConfig::Load(daemonConfig);
+
     /* Parse command line args */
     for (int i = 1; i < argc; ++i) {
         if (0 == strcmp("-h", argv[i])) {
@@ -453,7 +456,7 @@ int main(int argc, char** argv)
     cntr.Add(new TransportFactory<TCPTransport>("tcp", false));
 
 #if !defined(QCC_OS_DARWIN)
-#if !defined(QCC_OS_WINDOWS)
+#if !defined(QCC_OS_GROUP_WINDOWS)
     if (!noBT) {
         cntr.Add(new TransportFactory<BTTransport>("bluetooth", false));
     }

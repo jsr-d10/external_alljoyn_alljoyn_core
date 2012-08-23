@@ -633,6 +633,11 @@ class NameService : public qcc::Thread {
      */
     bool Enabled(void) { return m_enabled || m_doEnable; }
 
+    /**
+     * Stop the name service and the underlying thread
+     */
+    QStatus Stop();
+
   private:
     /**
      * @brief Copying a NameService object is forbidden.
@@ -698,6 +703,7 @@ class NameService : public qcc::Thread {
         IMPL_SHUTDOWN,          /**< Nothing is running and object may be destroyed */
         IMPL_INITIALIZING,      /**< Object is in the process of coming up and may be inconsistent */
         IMPL_RUNNING,           /**< Object is running and ready to go */
+        IMPL_STOPPING,          /**< Object is stopping */
     };
 
     /**
@@ -706,6 +712,14 @@ class NameService : public qcc::Thread {
      * capable of doing.
      */
     State m_state;
+
+    /**
+     * @internal
+     * @brief State variable to indicate that the name service is in the process
+     * of sending its terminal is-at messages indicating that any currently
+     * advertised names are becoming invalid.
+     */
+    bool m_terminal;
 
     class InterfaceSpecifier {
       public:
@@ -849,7 +863,7 @@ class NameService : public qcc::Thread {
      * @internal
      * @brief Retransmit exported advertisements.
      */
-    void Retransmit(void);
+    void Retransmit(bool exiting);
 
     /**
      * @internal
@@ -933,7 +947,7 @@ class NameService : public qcc::Thread {
      */
     std::list<Header> m_outbound;
 
-#if defined(QCC_OS_WINDOWS)
+#if defined(QCC_OS_GROUP_WINDOWS)
     /**
      * @internal @brief A socket to hold to keep winsock initialized
      * as long as the name service is alive.

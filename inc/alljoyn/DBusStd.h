@@ -25,12 +25,13 @@
 
 #include <qcc/platform.h>
 
-#include <alljoyn/BusAttachment.h>
-#include <alljoyn/InterfaceDescription.h>
+#ifdef __cplusplus
 
 #include <Status.h>
 
 namespace ajn {
+class BusAttachment;
+
 namespace org {
 namespace freedesktop {
 
@@ -42,6 +43,7 @@ extern const char* WellKnownName;                      /**< The well known name 
 
 extern const char* AnnotateNoReply;                    /**< Annotation for reply to a method call */
 extern const char* AnnotateDeprecated;                 /**< Annotation for marking entry as depreciated  */
+extern const char* AnnotateEmitsChanged;               /**< Annotation for when a property is modified {true,false,invalidates} */
 
 /** Definitions for org.freedesktop.DBus.Properties */
 namespace Properties {
@@ -65,6 +67,8 @@ QStatus CreateInterfaces(BusAttachment& bus);
 }
 }
 }
+#endif /* #ifdef __cplusplus */
+
 /**
  * @name DBus RequestName input params
  * org.freedesktop.DBus.RequestName input params (see DBus spec)
@@ -102,6 +106,9 @@ QStatus CreateInterfaces(BusAttachment& bus);
 #define DBUS_START_REPLY_SUCCESS          1         /**< StartServiceByName reply: Service is started */
 #define DBUS_START_REPLY_ALREADY_RUNNING  2         /**< StartServiceByName reply: Service is already running */
 // @}
+
+#ifdef __cplusplus
 }
+#endif
 
 #endif

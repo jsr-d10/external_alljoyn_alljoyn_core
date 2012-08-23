@@ -30,6 +30,7 @@
 #include <qcc/Debug.h>
 #include <qcc/Util.h>
 #include <qcc/String.h>
+#include <qcc/ScopedMutexLock.h>
 #include <qcc/Mutex.h>
 #include <alljoyn/DBusStd.h>
 #include <alljoyn/AllJoynStd.h>
@@ -184,6 +185,41 @@ void BusObject::GetProp(const InterfaceDescription::Member* member, Message& msg
     }
 }
 
+void BusObject::EmitPropChanged(const char* ifcName, const char* propName, MsgArg& val, SessionId id)
+{
+    const InterfaceDescription* ifc = bus.GetInterface(ifcName);
+
+    qcc::String emitsChanged;
+    if (ifc && ifc->GetPropertyAnnotation(propName, org::freedesktop::DBus::AnnotateEmitsChanged, emitsChanged)) {
+        if (emitsChanged == "true") {
+            const InterfaceDescription* bus_ifc = bus.GetInterface(org::freedesktop::DBus::InterfaceName);
+            const InterfaceDescription::Member* propChanged = (bus_ifc ? bus_ifc->GetMember("PropertiesChanged") : NULL);
+
+            if (NULL != propChanged) {
+                MsgArg args[3];
+                args[0].Set("s", ifcName);
+                MsgArg str("{sv}", propName, &val);
+                args[1].Set("a{sv}", 1, &str);
+                args[2].Set("as", 0, NULL);
+                Signal(NULL, id, *propChanged, args, ArraySize(args));
+            }
+        } else if (emitsChanged == "invalidates") {
+            const InterfaceDescription* bus_ifc = bus.GetInterface(org::freedesktop::DBus::InterfaceName);
+            const InterfaceDescription::Member* propChanged = (bus_ifc ? bus_ifc->GetMember("PropertiesChanged") : NULL);
+
+            if (NULL != propChanged) {
+                // EMPTY array, followed by array of strings
+                MsgArg args[3];
+                args[0].Set("s", ifcName);
+                args[1].Set("a{sv}", 0, NULL);
+                args[2].Set("as", 1, &propName);
+                Signal(NULL, id, *propChanged, args, ArraySize(args));
+            }
+        }
+    }
+}
+
+
 void BusObject::SetProp(const InterfaceDescription::Member* member, Message& msg)
 {
     QStatus status = ER_BUS_NO_SUCH_PROPERTY;
@@ -207,7 +243,11 @@ void BusObject::SetProp(const InterfaceDescription::Member* member, Message& msg
                     QCC_DbgPrintf(("Property value for %s has wrong type %s", property->v_string.str, prop->signature.c_str()));
                     status = ER_BUS_SET_WRONG_SIGNATURE;
                 } else if (prop->access & PROP_ACCESS_WRITE) {
+                    // set the value, then inform bus listeners via Signal
                     status = Set(iface->v_string.str, property->v_string.str, *(val->v_variant.val));
+                    // notify all session members that this property has changed
+                    const SessionId id = msg->hdrFields.field[ALLJOYN_HDR_FIELD_SESSION_ID].v_uint32;
+                    EmitPropChanged(iface->v_string.str, property->v_string.str, *(val->v_variant.val), id);
                 } else {
                     QCC_DbgPrintf(("No write access on property %s", property->v_string.str));
                     status = ER_BUS_PROPERTY_ACCESS_DENIED;
@@ -337,7 +377,7 @@ void BusObject::InstallMethods(MethodTable& methodTable)
     vector<MethodContext>::iterator iter;
     for (iter = components->methodContexts.begin(); iter != components->methodContexts.end(); iter++) {
         const MethodContext methodContext = *iter;
-        methodTable.Add(this, iter->handler, iter->member, iter->context);
+        methodTable.Add(this, methodContext.handler, methodContext.member, methodContext.context);
     }
 }
 
@@ -500,6 +540,7 @@ QStatus BusObject::MethodReply(const Message& msg, QStatus status)
 
 void BusObject::AddChild(BusObject& child)
 {
+    //ScopedMutexLock(bus.GetInternal().GetLocalEndpoint().objectsLock, MUTEX_CONTEXT);
     QCC_DbgPrintf(("AddChild %s to object with path = \"%s\"", child.GetPath(), GetPath()));
     child.parent = this;
     components->children.push_back(&child);
@@ -507,6 +548,7 @@ void BusObject::AddChild(BusObject& child)
 
 QStatus BusObject::RemoveChild(BusObject& child)
 {
+    //ScopedMutexLock(bus.GetInternal().GetLocalEndpoint().objectsLock, MUTEX_CONTEXT);
     QStatus status = ER_BUS_NO_SUCH_OBJECT;
     vector<BusObject*>::iterator it = find(components->children.begin(), components->children.end(), &child);
     if (it != components->children.end()) {
@@ -521,6 +563,7 @@ QStatus BusObject::RemoveChild(BusObject& child)
 
 BusObject* BusObject::RemoveChild()
 {
+    //ScopedMutexLock(bus.GetInternal().GetLocalEndpoint().objectsLock, MUTEX_CONTEXT);
     size_t sz = components->children.size();
     if (sz > 0) {
         BusObject* child = components->children[sz - 1];
@@ -535,6 +578,7 @@ BusObject* BusObject::RemoveChild()
 
 void BusObject::Replace(BusObject& object)
 {
+    //ScopedMutexLock(bus.GetInternal().GetLocalEndpoint().objectsLock, MUTEX_CONTEXT);
     QCC_DbgPrintf(("Replacing object with path = \"%s\"", GetPath()));
     object.components->children = components->children;
     vector<BusObject*>::iterator it = object.components->children.begin();

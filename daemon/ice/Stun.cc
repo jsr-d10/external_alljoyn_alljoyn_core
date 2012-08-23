@@ -28,7 +28,7 @@
 #include <qcc/Crypto.h>
 #include <qcc/NetInfo.h>
 #include <qcc/Socket.h>
-#include <qcc/ScatterGatherList.h>
+#include "ScatterGatherList.h"
 #include <Stun.h>
 #include <StunAttribute.h>
 #include <StunIOInterface.h>
@@ -472,7 +472,7 @@ void Stun::ReceiveUDP()
 
             if (StunMessage::ExtractMessageMethod(rawMsgType) == STUN_MSG_DATA_METHOD) {
                 // parse message and extract DATA attribute contents.
-                uint8_t dummyHmac[hmacKeyLen];
+                uint8_t* dummyHmac = new uint8_t[hmacKeyLen];
                 StunMessage msg("", dummyHmac, hmacKeyLen);
                 QStatus status;
 
@@ -513,6 +513,7 @@ void Stun::ReceiveUDP()
                     }
                     sb.relayed = true;
                 }
+                delete [] dummyHmac;
             }
         }
 

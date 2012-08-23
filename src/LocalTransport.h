@@ -49,14 +49,6 @@
 #include "Transport.h"
 
 #include <qcc/STLContainer.h>
-//#if defined(__GNUCC__) || defined (QCC_OS_DARWIN)
-//#include <ext/hash_map>
-//namespace std {
-//using namespace __gnu_cxx;
-//}
-//#else
-//#include <hash_map>
-//#endif
 
 namespace ajn {
 
@@ -72,6 +64,7 @@ class LocalEndpoint : public BusEndpoint, public qcc::AlarmListener, public Mess
     friend class TCPTransport;
     friend class LocalTransport;
     friend class UnixTransport;
+    friend class BusObject;
 
   public:
 
@@ -122,15 +115,13 @@ class LocalEndpoint : public BusEndpoint, public qcc::AlarmListener, public Mess
     /**
      * Register a handler for method call reply
      *
-     * @param receiver     The object that will receive the response
-     * @param replyHandler The reply callback function
-     * @param method       Interface/member of method call awaiting this reply.
-     * @param serial       The serial number expected in the reply
-     * @param secure       The value is true if the reply must be secure. Replies must be
-     *                     secure if the method call was secure.
-     * @param context      Opaque context pointer passed from method call to it's reply handler.
-     * @param timeout      Timeout specified in milliseconds to wait for a reply to a method call.
-     *                     The value 0 means use the implementation dependent default timeout.
+     * @param receiver       The object that will receive the response
+     * @param replyHandler   The reply callback function
+     * @param method         Interface/member of method call awaiting this reply.
+     * @param methodCallMsg  The method call message
+     * @param context        Opaque context pointer passed from method call to it's reply handler.
+     * @param timeout        Timeout specified in milliseconds to wait for a reply to a method call.
+     *                       The value 0 means use the implementation dependent default timeout.
      * @return
      *      - ER_OK if successful
      *      - An error status otherwise
@@ -138,31 +129,48 @@ class LocalEndpoint : public BusEndpoint, public qcc::AlarmListener, public Mess
     QStatus RegisterReplyHandler(MessageReceiver* receiver,
                                  MessageReceiver::ReplyHandler replyHandler,
                                  const InterfaceDescription::Member& method,
-                                 uint32_t serial,
-                                 bool secure,
+                                 Message& methodCallMsg,
                                  void* context = NULL,
                                  uint32_t timeout = 0);
 
     /**
-     * Un-Register a handler for method call reply
+     * Un-register the handler for a specified method call.
      *
-     * @param serial       The serial number expected in the reply
+     * @param methodCallMsg  The specified method call message
      *
-     * @return true if a handler matching the serial number is found and unregistered
+     * @return true if a reply handler for the method call is found and unregistered
      */
-    bool UnregisterReplyHandler(uint32_t serial);
+    bool UnregisterReplyHandler(Message& methodCallMsg);
 
     /**
-     * Extend the timeout on the handler for method call reply
+     * Conditionally updates the serial number on a message. This is to ensure that the serial
+     * number accurately reflects the order in which messages are queued for delivery. For message
+     * that were delayed pending authentication the serial number may be updated by this call.
      *
-     * @param serial       The serial number expected in the reply
-     * @param extension    The number of milliseconds to add to the timeout.
-     *
-     * @return
-     *      - ER_OK if the timeout was succesfully extended.
-     *      - An error status otherwise
+     * @param msg  The message to update the serial number on.
      */
-    QStatus ExtendReplyHandlerTimeout(uint32_t serial, uint32_t extension);
+    void UpdateSerialNumber(Message& msg);
+
+    /**
+     * Pause the timeout handler for specified method call. If the reply handler is succesfully
+     * paused it must be resumed by calling ResumeReplyHandler later.
+     *
+     * @param methodCallMsg  The method call message
+     *
+     * @return  Returns true if the timeout was paused or false if there is no reply
+     *          handler registered for the specified message.
+     */
+    bool PauseReplyHandlerTimeout(Message& methodCallMsg);
+
+    /**
+     * Resume the timeout handler for specified method call.
+     *
+     * @param methodCallMsg  The method call message
+     *
+     * @return  Returns true if the timeout was resumed or false if there is no reply
+     *          handler registered for the specified message.
+     */
+    bool ResumeReplyHandlerTimeout(Message& methodCallMsg);
 
     /**
      * Register a signal handler.
@@ -253,7 +261,7 @@ class LocalEndpoint : public BusEndpoint, public qcc::AlarmListener, public Mess
     /**
      * Notify local endpoint that a bus connection has been made.
      */
-    void BusIsConnected();
+    void OnBusConnected();
 
     /**
      * Get the org.freedesktop.DBus remote object.
@@ -367,6 +375,22 @@ class LocalEndpoint : public BusEndpoint, public qcc::AlarmListener, public Mess
     Dispatcher dispatcher;
 
     /**
+     * Performs operations that were deferred until the bus is connected such
+     * as object registration callbacks
+     */
+    class DeferredCallbacks : public qcc::AlarmListener {
+      public:
+        DeferredCallbacks(LocalEndpoint* ep) : endpoint(ep) { }
+
+        void AlarmTriggered(const qcc::Alarm& alarm, QStatus reason);
+
+      private:
+        LocalEndpoint* endpoint;
+    };
+
+    DeferredCallbacks deferredCallbacks;
+
+    /**
      * PushMessage worker.
      */
     QStatus DoPushMessage(Message& msg);
@@ -384,19 +408,21 @@ class LocalEndpoint : public BusEndpoint, public qcc::AlarmListener, public Mess
     /**
      * Type definition for a method call reply context
      */
-    typedef struct {
-        MessageReceiver* object;                     /**< The object to receive the reply */
-        MessageReceiver::ReplyHandler handler;       /**< The receiving object's handler function */
-        const InterfaceDescription::Member* method;  /**< The method that was called */
-        bool secure;                                 /**< This wil be true if the method call was secure */
-        void* context;                               /**< The calling object's context */
-        qcc::Alarm alarm;                            /**< Alarm object for handling method call timeouts */
-    } ReplyContext;
+    class ReplyContext;
 
     /**
      * Equality function for matching object paths
      */
     struct PathEq { bool operator()(const char* p1, const char* p2) const { return (p1 == p2) || (strcmp(p1, p2) == 0); } };
+
+    /**
+     * Remove a reply handler from the reply handler list.
+     *
+     * @param serial       The serial number expected in the reply
+     *
+     * @return A pointer to the reply context if it was removed.
+     */
+    ReplyContext* RemoveReplyHandler(uint32_t serial);
 
     /**
      * Hash functor
@@ -410,68 +436,20 @@ class LocalEndpoint : public BusEndpoint, public qcc::AlarmListener, public Mess
     /**
      * Registered LocalObjects
      */
-    unordered_map<const char*, BusObject*, Hash, PathEq> localObjects;
+    STL_NAMESPACE_PREFIX::unordered_map<const char*, BusObject*, Hash, PathEq> localObjects;
 
     /**
-     * Map from serial numbers for outstanding method calls to response handelers.
+     * List of contexts for method call replies.
      */
-    std::map<uint32_t, ReplyContext> replyMap;
-
-#if defined(QCC_OS_ANDROID)
-    /**
-     * Type definition for a message pending for permission check.
-     */
-    typedef struct ChkPendingMsg {
-        Message msg;                                /**< The message pending for permission check */
-        const MethodTable::Entry* methodEntry;      /**< Method handler */
-        std::list<SignalTable::Entry> signalCallList;    /**< List of signal handlers */
-        qcc::String perms;                          /**< The required permissions */
-        ChkPendingMsg(Message& msg, const MethodTable::Entry* methodEntry, const qcc::String& perms) : msg(msg), methodEntry(methodEntry), perms(perms) { }
-        ChkPendingMsg(Message& msg, std::list<SignalTable::Entry>& signalCallList, const qcc::String& perms) : msg(msg), signalCallList(signalCallList), perms(perms) { }
-    } ChkPendingMsg;
-
-    /**
-     * Type definition for a permission-checked method or signal call.
-     */
-    typedef struct PermCheckedEntry {
-      public:
-        const qcc::String sender;                        /**< The endpoint name that issues the call */
-        const qcc::String sourcePath;                    /**< The object path of the call */
-        const qcc::String iface;                         /**< The interface name of the call */
-        const qcc::String signalName;                    /**< The method or signal name of the call */
-        PermCheckedEntry(const qcc::String& sender, const qcc::String& sourcePath, const qcc::String& iface, const qcc::String& signalName) : sender(sender), sourcePath(sourcePath), iface(iface), signalName(signalName) { }
-        bool operator<(const PermCheckedEntry& other) const {
-            return (sender < other.sender) || ((sender == other.sender) && (sourcePath < other.sourcePath))
-                   || ((sourcePath == other.sourcePath) && (iface < other.iface))
-                   || ((iface == other.iface) && (signalName < other.signalName));
-        }
-    } PermCheckedEntry;
-
-    /**
-     * Type definition for a thread that does the permission verification on the message calls
-     */
-    class PermVerifyThread : public qcc::Thread {
-        qcc::ThreadReturn STDCALL Run(void* arg);
-
-      public:
-        PermVerifyThread() : Thread("PermVerifyThread") { }
-    };
-
-    PermVerifyThread permVerifyThread;             /**< The permission verification thread */
-    std::list<ChkPendingMsg> chkPendingMsgList;    /**< List of messages pending for permission check */
-    std::map<PermCheckedEntry, bool> permCheckedCallMap;  /**< Map of a permission-checked method/signal call to the verification result */
-    qcc::Mutex chkMsgListLock;                     /**< Mutex protecting the pending message list and the verification result cache map */
-    qcc::Event wakeEvent;                          /**< Event to notify the permission verification thread of new pending messages */
-#endif
+    std::map<uint32_t, ReplyContext*> replyMap;
 
     bool running;                      /**< Is the local endpoint up and running */
-    int32_t refCount;                  /**< Reference count for local transport */
     MethodTable methodTable;           /**< Hash table of BusObject methods */
     SignalTable signalTable;           /**< Hash table of BusObject signal handlers */
     BusAttachment& bus;                /**< Message bus */
     qcc::Mutex objectsLock;            /**< Mutex protecting Objects hash table */
-    qcc::Mutex replyMapLock;           /**< Mutex protecting replyMap */
-    qcc::GUID128 guid;                    /**< GUID to uniquely identify a local endpoint */
+    qcc::Mutex replyMapLock;           /**< Mutex protecting reply contexts */
+    qcc::GUID128 guid;                 /**< GUID to uniquely identify a local endpoint */
     qcc::String uniqueName;            /**< Unique name for endpoint */
 
     std::vector<BusObject*> defaultObjects;  /**< Auto-generated, heap allocated parent objects */

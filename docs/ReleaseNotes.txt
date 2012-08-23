@@ -1,4 +1,4 @@
-AllJoyn Version 2.5.1 Release Notes
+AllJoyn Version 3.1.0 Release Notes
 -----------------------------------
 
 Platform Support
@@ -7,65 +7,32 @@ Platform Support
 2) Android Froyo 2.2 (ARM7)
 3) Android Gingerbread 2.3.4 (ARM7)
 4) Android Ice Cream Sandwich 4.0 (ARM7)
-FIXME #### Windows is not supported
+5) Windows XP (32 bit x86)
+6) Windows 7 (32 and 64 bit x86)
 
 
 Features added in this release
 ------------------------------
 
-FIXME #### Added support for ICE (IETF draft-ietf-mmusic-ice-19) based peer-to-peer
-FIXME #### connections.  This new feature allows peers to connect over IP networks when
-FIXME #### multicast is blocked or when 802.11 wireless isolation prevents the existing
-FIXME #### AllJoyn discovery and connect mechanisms from succeeding.
-
-FIXME #### Added an API (BusAttachment.EnableConcurrentCallbacks) for controlling
-FIXME #### concurrent method/signal handler callbacks. Previously, the AllJoyn client
-FIXME #### library did not concurrently dispatch user-defined method/signal handlers.  It
-FIXME #### did, however, concurrently dispatch certain AllJoyn control related callbacks
-FIXME #### such as BusListener.FoundAdvertisedName, etc. These control related callbacks
-FIXME #### are now under the control of the new EnableConcurrentCalbacks API.
-
-FIXME #### Added new API BusAttachment.SetLinkTimeoutAsync. This new method is an
-FIXME #### asynchronous form of the existing SetLinkTimeout call.
-
-FIXME #### Added GoogleTest based test framework to automate the testing of the AllJoyn
-FIXME #### core.
-
+FIXME ####
 
 Issues Addressed in this Release
 --------------------------------
 
-FIXME #### ALLJOYN-829: Changing link timeout via SetLinkTimeout now takes effect
-FIXME #### immediately. Previously, the link needed to receive at least one more message
-FIXME #### before the change would take effect.
-
-FIXME #### ALLJOYN-830: SetLinkTimeoutAsync was added to the external API to allow the user
-FIXME #### to set the link timeout from within the SessionPortListener::SessionJoined (or
-FIXME #### other AllJoyn) callback.
-
-FIXME #### ALLJOYN-907: LostAdvertisedName indication is no longer delayed when the client
-FIXME #### side disconnects prior to the service side.
-
+FIXME ####
 
 Known issues and limitations with this release
 ----------------------------------------------
 
 FIXME #### ALLJOYN-1154: The number of names that can be advertised from a single AllJoyn
-FIXME #### daemon instance (either bundled or unbundled) over TCP is limited to about 1400
-FIXME #### bytes.
+daemon instance (either bundled or unbundled) over TCP is limited to about 1400
+bytes.
 
 FIXME #### ALLJOYN-1217: AllJoyn operation over Bluetooth is stable with up to 3
-FIXME #### devices. Some instabilites are seen with 4 or more devices.
+devices. Some instabilites are seen with 4 or more devices.
 
 FIXME #### ALLJOYN-1228: Discovery times when using ICE / Rendezvous are sometimes longer
-FIXME #### than necessary due to proximity scanning.
-
-FIXME #### ALLJOYN-(various): Daemon crashes are possible when using the bundled version of
-FIXME #### the AllJoyn daemon. Because of this, use of the bundled daemon is not officially
-FIXME #### supported in 2.5.0
-
-FIXME #### QA testing for the 2.5.0 release was completed only on Android variants of the
-FIXME #### non-bundled daemon.
+than necessary due to proximity scanning.
 
 
 Compatibility
@@ -101,7 +68,14 @@ new BusAttachment.EnableConcurrentCallbacks() API.
 
 Change history
 --------------
-2.5.0 - FIXME ####
+2.5.1 - Bug fixes.
+
+2.5.0 - Added support for ICE (IETF draft-ietf-mmusic-ice-19) connections.
+        Added BusAttachment.EnableConcurrentCallbacks.
+        Added BusAttachment.SetLinkTimeoutAsync.
+        Added GoogleTest unit test framework.
+
+2.3.6 - AllJoyn Unity Extension
 
 2.3.5 - Bug fixes.
 
@@ -111,7 +85,7 @@ Change history
 
 2.3.1 - Bug fixes.
 
-2.3.0 - Added support for dynamic enable/disable of Bluetooth device on 
+2.3.0 - Added support for dynamic enable/disable of Bluetooth device on
         Windows. Alpha support for Android ICS. BT and Windows stability.
 
 2.2.0 - Support for bundled daemon. BT fixes. Minor mods to security API.
@@ -130,3 +104,4 @@ Change history
         API's and daemon protocols changed.
 
 1.8.0 - Initial Open Source Release
+

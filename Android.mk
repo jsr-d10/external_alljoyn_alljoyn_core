@@ -41,10 +41,8 @@ LOCAL_SRC_FILES := \
 	../common/src/GUID.cc \
 	../common/src/IPAddress.cc \
 	../common/src/KeyBlob.cc \
-	../common/src/LockTrace.cc \
 	../common/src/Logger.cc \
 	../common/src/Pipe.cc \
-	../common/src/ScatterGatherList.cc \
 	../common/src/SocketStream.cc \
 	../common/src/Stream.cc \
 	../common/src/StreamPump.cc \
@@ -52,7 +50,6 @@ LOCAL_SRC_FILES := \
 	../common/src/StringSource.cc \
 	../common/src/StringUtil.cc \
 	../common/src/ThreadPool.cc \
-	../common/src/Timer.cc \
 	../common/src/Util.cc \
 	../common/src/XmlElement.cc \
 	../common/os/posix/AdapterUtil.cc \
@@ -61,9 +58,11 @@ LOCAL_SRC_FILES := \
 	../common/os/posix/FileStream.cc \
 	../common/os/posix/IfConfigLinux.cc \
 	../common/os/posix/Mutex.cc \
+	../common/os/posix/OSLogger.cc \
 	../common/os/posix/Socket.cc \
 	../common/os/posix/SslSocket.cc \
 	../common/os/posix/Thread.cc \
+	../common/os/posix/Timer.cc \
 	../common/os/posix/atomic.cc \
 	../common/os/posix/osUtil.cc \
 	../common/os/posix/time.cc \
@@ -99,6 +98,7 @@ LOCAL_SRC_FILES += \
 	src/MsgArg.cc \
 	src/NullTransport.cc \
 	src/PeerState.cc \
+	src/ProtectedAuthListener.cc \
 	src/ProxyBusObject.cc \
 	src/RemoteEndpoint.cc \
 	src/SASLEngine.cc \
@@ -110,11 +110,12 @@ LOCAL_SRC_FILES += \
 	src/TransportList.cc \
 	src/XmlHelper.cc \
 	src/posix/ClientTransport.cc \
-	src/posix/android/PermissionDB.cc
+	src/posix/android/PermissionDB.cc \
+	src/posix/android/PermissionMgr.cc
 
 
 LOCAL_SRC_FILES += \
-	autogen/Status.c \
+	autogen/Status.cc \
 	autogen/version.cc
 
 LOCAL_SHARED_LIBRARIES := \
@@ -149,7 +150,7 @@ LOCAL_CFLAGS += \
 	-D_GLIBCXX_PERMIT_BACKWARD_HASH
 
 #alljoyn_ndk_source_root := $(HISTORICAL_NDK_VERSIONS_ROOT)/android-ndk-r$(LOCAL_NDK_VERSION)/sources
-alljoyn_ndk_source_root := $(HISTORICAL_NDK_VERSIONS_ROOT)/android-ndk-r7/sources
+alljoyn_ndk_source_root := $(HISTORICAL_NDK_VERSIONS_ROOT)/android-ndk-r6/sources
 
 LOCAL_C_INCLUDES := \
 	external/alljoyn/alljoyn_core/autogen \
@@ -187,6 +188,7 @@ LOCAL_SRC_FILES := \
 	daemon/RuleTable.cc \
 	daemon/TCPTransport.cc \
 	daemon/VirtualEndpoint.cc \
+	daemon/android/P2PHelperInterface.cc \
 	daemon/bt_bluez/AdapterObject.cc \
 	daemon/bt_bluez/BlueZHCIUtils.cc \
 	daemon/bt_bluez/BlueZIfc.cc \
@@ -232,10 +234,11 @@ LOCAL_SRC_FILES := \
 	daemon/posix/DaemonTransport.cc \
 	daemon/posix/ICEPacketStream.cc \
 	daemon/posix/ProximityScanner.cc \
+	daemon/posix/Socket.cc \
 	daemon/posix/UDPPacketStream.cc
 
 LOCAL_SRC_FILES += \
-	autogen/Status.c \
+	autogen/Status.cc \
 	autogen/version.cc
 
 LOCAL_SHARED_LIBRARIES := \
@@ -305,8 +308,54 @@ LOCAL_ARM_MODE := arm
 
 include $(BUILD_SHARED_LIBRARY)
 
-# Rules to build AllJoynAndroidExt.apk
+# Rules to build libP2pHelperService.so
 include $(CLEAR_VARS)
+LOCAL_CPP_EXTENSION := .cpp
+
+# NOTE1: flag "-Wno-psabi" removes warning about GCC 4.4 va_list warning
+# NOTE2: flag "-Wno-write-strings" removes warning about deprecated conversion
+#        from string constant to char*
+#
+LOCAL_CFLAGS := \
+	-Wno-psabi \
+	-Wno-write-strings \
+	-DQCC_CPU_ARM \
+	-DQCC_OS_ANDROID \
+	-DQCC_OS_GROUP_POSIX
+
+LOCAL_C_INCLUDES := \
+	external/alljoyn/alljoyn_core/alljoyn_android/alljoyn_android_p2pservice/jni \
+	external/alljoyn/alljoyn_core/autogen \
+	external/alljoyn/alljoyn_core/inc \
+	external/alljoyn/alljoyn_core/JSON \
+	external/alljoyn/common/inc \
+	external/alljoyn/common/inc/qcc \
+	external/connectivity/stlport/stlport \
+	external/openssl/include \
+
+LOCAL_SRC_FILES := \
+	alljoyn_android/alljoyn_android_p2pservice/jni/P2pHelperService.cpp
+
+LOCAL_SHARED_LIBRARIES := \
+	liballjoyn \
+	libcrypto \
+	libssl \
+	liblog
+
+LOCAL_REQUIRED_MODULES := \
+	external/alljoyn/alljoyn_core/liballjoyn \
+	external/openssl/crypto/libcrypto \
+	external/openssl/ssl/libssl \
+	external/connectivity/stlport
+
+LOCAL_MODULE_TAGS := optional
+LOCAL_MODULE := libP2pHelperService
+
+LOCAL_ARM_MODE := arm
+
+include $(BUILD_SHARED_LIBRARY)
+
+# Rules to build AllJoynAndroidExt.apk
 include $(CLEAR_VARS)
 LOCAL_PATH := $(LOCAL_PATH)/alljoyn_android/alljoyn_android_ext
 LOCAL_MODULE_TAGS := optional
@@ -325,3 +374,21 @@ LOCAL_JNI_SHARED_LIBRARIES := libAllJoynAndroidExt
 
 include $(BUILD_PACKAGE)
 
+# Rules to build P2pService.apk
+include $(CLEAR_VARS)
+LOCAL_PATH := $(LOCAL_PATH)/../alljoyn_android_p2pservice
+LOCAL_MODULE_TAGS := optional
+
+#LOCAL_SRC_FILES := $(call all-subdir-java-files)
+LOCAL_SRC_FILES := \
+	src/org/alljoyn/bus/p2p/service/P2pHelperAndroidActivity.java \
+	src/org/alljoyn/bus/p2p/service/P2pHelperAndroidService.java \
+	src/org/alljoyn/bus/p2p/service/P2pInterface.java \
+	src/org/alljoyn/bus/p2p/service/P2pManager.java \
+	src/org/alljoyn/bus/p2p/service/P2pReceiver.java
+
+LOCAL_PACKAGE_NAME := AllJoynP2pService
+LOCAL_CERTIFICATE := platform
+LOCAL_JNI_SHARED_LIBRARIES := libP2pHelperService
+
+include $(BUILD_PACKAGE)

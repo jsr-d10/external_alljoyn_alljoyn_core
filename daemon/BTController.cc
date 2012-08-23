@@ -550,12 +550,6 @@ void BTController::ProcessDeviceChange(const BDAddress& adBdAddr,
                 }
 
                 oldAdInfo.Diff(newAdInfo, &added, &removed);
-                foundNodeDB.UpdateDB(&added, &removed, false);  // Remove names only.
-
-                removed.Clear();
-                oldAdInfo.NodeDiff(newAdInfo, NULL, &removed);  // Remove nodes that are actually gone.
-                foundNodeDB.UpdateDB(NULL, &removed);
-
 
                 foundNodeDB.UpdateDB(&added, &removed, false);  // Remove names only.
 
@@ -882,9 +876,6 @@ bool BTController::CheckIncomingAddress(const BDAddress& addr, BTBusAddress& red
             return allow;
         } else if ((nodeDB.Size() - 1) >= maxConnections) {
             QCC_DbgPrintf(("Reject incomming connection from new device since we've reached our max connections."));
-            return false;
-        } else if ((nodeDB.Size() - 1) >= maxConnections) {
-            QCC_DbgPrintf(("Rejecting incomming connection from new device since we've reached our max connections."));
             return false;
         } else {
             QCC_DbgPrintf(("Accept incoming connection as master."));
@@ -3092,7 +3083,7 @@ void BTController::JoinSessionNodeComplete()
 void BTController::AlarmTriggered(const Alarm& alarm, QStatus reason)
 {
     QCC_DbgTrace(("BTController::AlarmTriggered(alarm = <>, reasons = %s)", QCC_StatusText(reason)));
-    DispatchInfo* op = static_cast<DispatchInfo*>(alarm.GetContext());
+    DispatchInfo* op = static_cast<DispatchInfo*>(alarm->GetContext());
     assert(op);
 
     if (reason == ER_OK) {

@@ -1,9 +1,6 @@
-/**
- * @file
- */
-
 /******************************************************************************
- * Copyright 2012, Qualcomm Innovation Center, Inc.
+ *
+ * Copyright 2011-2012, Qualcomm Innovation Center, Inc.
  *
  *    Licensed under the Apache License, Version 2.0 (the "License");
  *    you may not use this file except in compliance with the License.
@@ -16,27 +13,20 @@
  *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
- ******************************************************************************/
-package org.alljoyn.jni;
+ *
+ *****************************************************************************/
 
-import android.content.BroadcastReceiver;
-import android.content.Intent;
-import android.content.Context;
-import android.net.wifi.WifiManager;
-import android.util.Log;
+#pragma once
 
-public class StartServiceReceiver extends BroadcastReceiver{
-	
-	public StartServiceReceiver(){
-		super();
-	}
-	
-	@Override
-	public void onReceive(Context c, Intent intent){
-			
-			Intent serviceIntent = new Intent();
-			serviceIntent.setAction("org.alljoyn.jni.alljoynandroidext");
-			c.startService(serviceIntent);
-		
-	}
+#include <alljoyn/MsgArg.h>
+#include <ITypeCoercer.h>
+
+namespace AllJoyn {
+
+class WeakTypeCoercer : public ITypeCoercer {
+  public:
+    Platform::Object ^ Coerce(Platform::Object ^ obj, ajn::AllJoynTypeId typeId, bool inParam);
+};
+
 }
+// WeakTypeCoercer.h

@@ -54,7 +54,7 @@ class DaemonConfig {
     /**
      * Return the configuration singleton
      */
-    static DaemonConfig* Access() { return singleton; }
+    static DaemonConfig* Access() { assert(singleton); return singleton; }
 
     /**
      * Release the configuration singleton
@@ -103,11 +103,21 @@ class DaemonConfig {
     /**
      * Check if the configuration has a specific key.
      */
-    bool Has(const char* key) { return !Get(key).empty(); }
+    bool Has(const char* key);
 
   private:
 
     DaemonConfig();
+
+    /*
+     * Copy constructor private and undefined
+     */
+    DaemonConfig(const DaemonConfig& other);
+
+    /*
+     * Assignment operator private and undefined
+     */
+    DaemonConfig& operator=(const DaemonConfig& other);
 
     ~DaemonConfig();
 

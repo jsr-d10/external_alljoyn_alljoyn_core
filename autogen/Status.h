@@ -22,6 +22,14 @@
 #ifndef _STATUS_H
 #define _STATUS_H
 
+#ifndef ALLJOYN_DLLExport /* Used for extern C functions. Add __declspec(dllexport) when using MSVC */
+#  if defined(_MSC_VER) /* MSVC compiler*/
+#    define ALLJOYN_DLLExport __declspec(dllexport)
+#  else /* compiler other than MSVC */
+#    define ALLJOYN_DLLExport
+#  endif /* Compiler type */
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -297,7 +305,10 @@ typedef enum {
     ER_RENDEZVOUS_SERVER_ERR503_STATUS_UNAVAILABLE = 0x90d5 /**< Received a HTTP 503 status code from the Rendezvous Server. This indicates unavailability of the Server error state */,
     ER_RENDEZVOUS_SERVER_ERR401_UNAUTHORIZED_REQUEST = 0x90d6 /**< Received a HTTP 401 status code from the Rendezvous Server. This indicates that the client is unauthorized to send a request to the Server. The Client login procedure must be initiated. */,
     ER_RENDEZVOUS_SERVER_UNRECOVERABLE_ERROR = 0x90d7 /**< Received a HTTP status code indicating unrecoverable error from the Rendezvous Server. The connection with the Server should be re-established. */,
-    ER_RENDEZVOUS_SERVER_ROOT_CERTIFICATE_UNINITIALIZED = 0x90d8 /**< Rendezvous Server root ceritificate uninitialized. */
+    ER_RENDEZVOUS_SERVER_ROOT_CERTIFICATE_UNINITIALIZED = 0x90d8 /**< Rendezvous Server root ceritificate uninitialized. */,
+    ER_BUS_NO_SUCH_ANNOTATION = 0x90d9 /**< No such annotation for a GET or SET operation  */,
+    ER_BUS_ANNOTATION_ALREADY_EXISTS = 0x90da /**< Attempt to add an annotation to an interface or property that already exists */,
+    ER_SOCK_CLOSING = 0x90db /**< Socket close in progress */
 } QStatus;
 
 /**
@@ -309,7 +320,7 @@ typedef enum {
  *
  * @return  C string representation of the status code.
  */
-extern const char* QCC_StatusText(QStatus status);
+extern ALLJOYN_DLLExport const char* QCC_StatusText(QStatus status);
 
 #ifdef __cplusplus
 }   /* extern "C" */

@@ -206,6 +206,28 @@ QStatus KeyStore::SetListener(KeyStoreListener& listener)
     }
 }
 
+QStatus KeyStore::SetDefaultListener()
+{
+    this->listener = new ProtectedKeyStoreListener(defaultListener);
+    return ER_OK;
+}
+
+QStatus KeyStore::Reset()
+{
+    if (storeState != UNAVAILABLE) {
+        QStatus status = Clear();
+        storeState = UNAVAILABLE;
+        delete listener;
+        listener = NULL;
+        delete defaultListener;
+        defaultListener = NULL;
+        shared = false;
+        return status;
+    } else {
+        return ER_FAIL;
+    }
+}
+
 QStatus KeyStore::Init(const char* fileName, bool isShared)
 {
     if (storeState == UNAVAILABLE) {
@@ -459,7 +481,6 @@ QStatus KeyStore::Reload()
     }
 
     lock.Lock(MUTEX_CONTEXT);
-
     QStatus status;
     uint32_t currentRevision = revision;
     KeyMap* currentKeys = keys;
@@ -519,7 +540,6 @@ QStatus KeyStore::Reload()
     }
 
     lock.Unlock(MUTEX_CONTEXT);
-
     return status;
 }
 
@@ -529,7 +549,6 @@ QStatus KeyStore::Push(Sink& sink)
     QStatus status = ER_OK;
 
     QCC_DbgHLPrintf(("KeyStore::Push (revision %d)", revision + 1));
-
     lock.Lock(MUTEX_CONTEXT);
 
     /*

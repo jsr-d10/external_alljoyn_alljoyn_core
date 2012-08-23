@@ -107,6 +107,7 @@ DiscoveryManager::DiscoveryManager(BusAttachment& bus)
     SCRAMAuthModule(),
     ProximityScanner(NULL),
     ClientAuthenticationFailed(false),
+    DiscoveryManagerTimer("DiscoveryManagerTimer"),
     InterfaceUpdateAlarm(NULL),
     SentFirstGETMessage(false),
     userCredentials(),
@@ -193,11 +194,9 @@ DiscoveryManager::~DiscoveryManager()
 {
     QCC_DbgPrintf(("DiscoveryManager::~DiscoveryManager()\n"));
 
-    /* Delete all the active alarms */
+    /* Remove all the active alarms */
     if (InterfaceUpdateAlarm) {
         DiscoveryManagerTimer.RemoveAlarm(*InterfaceUpdateAlarm);
-        delete InterfaceUpdateAlarm;
-        InterfaceUpdateAlarm = NULL;
     }
 
     /* Stop the DiscoveryManagerTimer which is used to handle all the alarms */
@@ -245,6 +244,8 @@ DiscoveryManager::~DiscoveryManager()
         delete iceCallback;
         iceCallback = NULL;
     }
+
+    delete InterfaceUpdateAlarm;
 
     DiscoveryManagerState = IMPL_SHUTDOWN;
 }
@@ -790,6 +791,7 @@ void DiscoveryManager::RemoveSessionDetailFromMap(bool client, std::pair<String,
 
             if (it->first == sessionDetail.first) {
                 OutgoingICESessions.erase(it++);
+                break;
             } else {
                 ++it;
             }
@@ -801,6 +803,7 @@ void DiscoveryManager::RemoveSessionDetailFromMap(bool client, std::pair<String,
 
             if (it->first == sessionDetail.first) {
                 IncomingICESessions.erase(it++);
+                break;
             } else {
                 ++it;
             }
@@ -1116,7 +1119,11 @@ void* DiscoveryManager::Run(void* arg)
                         InterfaceUpdateAlarm = NULL;
                     }
 
-                    InterfaceUpdateAlarm = new Alarm(INTERFACE_UPDATE_MIN_INTERVAL, this, 0, NULL);
+                    uint32_t interfaceUpdateMinimumInterval = INTERFACE_UPDATE_MIN_INTERVAL;
+                    qcc::AlarmListener* discoveryManagerListener = this;
+                    void* context = NULL;
+                    uint32_t zero = 0;
+                    InterfaceUpdateAlarm = new Alarm(interfaceUpdateMinimumInterval, discoveryManagerListener, context, zero);
                     status = DiscoveryManagerTimer.AddAlarm(*InterfaceUpdateAlarm);
 
                     if (status != ER_OK) {
@@ -1365,7 +1372,7 @@ void* DiscoveryManager::Run(void* arg)
                 OnDemandMessageSentTimeStamp = 0;
             }
 
-        } // end if(!ClientAuthenticationFailed)
+        }     // end if(!ClientAuthenticationFailed)
 
         if (Connection) {
 
@@ -1469,6 +1476,13 @@ void* DiscoveryManager::Run(void* arg)
 
                 QCC_DbgPrintf(("DiscoveryManager::Run(): Stop event fired\n"));
 
+                /* If the stop event has been set, we are going away for good.
+                 * So send the deleteAll message to the server */
+                if (Connection) {
+                    /* We dont check the return status as we are anyways going to disconnect */
+                    SendMessage(RendezvousSessionDeleteMessage);
+                }
+
                 //
                 // Disconnect from the Rendezvous Server if connected.
                 //
@@ -1521,6 +1535,13 @@ void* DiscoveryManager::Run(void* arg)
                 // The trigger is a HTTP disconnect event
                 //
                 QCC_DbgPrintf(("DiscoveryManager::Run(): HTTP disconnect event fired\n"));
+
+                /* If the disconnect event has been set, DaemonICETransport::StopListen has been called.
+                 * So send the deleteAll message to the server */
+                if (Connection) {
+                    /* We dont check the return status as we are anyways going to disconnect */
+                    SendMessage(RendezvousSessionDeleteMessage);
+                }
 
                 Disconnect();
 
@@ -1968,47 +1989,11 @@ QStatus DiscoveryManager::HandleAddressCandidatesResponse(AddressCandidatesRespo
 
     QStatus status = ER_OK;
 
-    // Flag used to indicate that the AllocateICESession callback was invoked
-    bool invokedAllocateICESession = false;
+    // If the address candidates was sent by a remote client to a service on this daemon, it will have the
+    // STUN info. In this case we have to invoke the AllocateICESession callback. Otherwise, we have to
+    // invoke the StartICEChecks callback.
 
-    // Flag used to indicate that the StartICEChecks callback was invoked
-    bool invokedStartICEChecks = false;
-
-    //
-    // If the address candidates message has been sent from a remote client to a local service, we need to
-    // invoke the AllocateICESession callback or else we have to invoke the StartICEChecks callback
-    //
-
-    //
-    // Check if we have received the address candidates from a remote service in response to the candidates that we sent out for a local
-    // client
-    //
-
-    multimap<String, SessionEntry>::iterator it;
-
-    for (it = OutgoingICESessions.begin(); it != OutgoingICESessions.end(); it++) {
-
-        if (((it->first) == response.peerAddr)) {
-            // Populate the details in the ActiveOutgoingICESessions map
-            (it->second).serviceCandidates = response.candidates;
-            (it->second).ice_frag = response.ice_ufrag;
-            (it->second).ice_pwd = response.ice_pwd;
-
-            // Invoke the callback to inform the DaemonICETransport that the Service candiates have been received
-            ((it->second).peerListener)->SetPeerCandiates((it->second).serviceCandidates, response.ice_ufrag, response.ice_pwd);
-
-            // Remove the entry from the OutgoingICESessions
-            OutgoingICESessions.erase(it);
-
-            invokedStartICEChecks = true;
-
-            // break out of the for loop
-            break;
-        }
-    }
-
-    // If the StartChecksCallback was not invoked
-    if (!invokedStartICEChecks) {
+    if (response.STUNInfoPresent) {
         // Check if the address candidates message received from the Client is in response
         // to a advertisement from this daemon.
         multimap<String, SearchResponseInfo>::iterator it;
@@ -2017,10 +2002,7 @@ QStatus DiscoveryManager::HandleAddressCandidatesResponse(AddressCandidatesRespo
         // IncomingICESession so that we can look that up later and direct the
         // address candidates that the service would generate to the appropriate client
         SessionEntry entry(true, response.candidates, response.ice_ufrag, response.ice_pwd);
-
-        if (response.STUNInfoPresent) {
-            entry.SetSTUNInfo(response.STUNInfo);
-        }
+        entry.SetSTUNInfo(response.STUNInfo);
 
         IncomingICESessions.insert(pair<String, SessionEntry>(response.peerAddr, entry));
 
@@ -2031,15 +2013,31 @@ QStatus DiscoveryManager::HandleAddressCandidatesResponse(AddressCandidatesRespo
             QCC_DbgPrintf(("DiscoveryManager::HandleAddressCandidatesResponse(): Invoking the AllocateICESession callback\n"));
             (*iceCallback)(ALLOCATE_ICE_SESSION, response.peerAddr, &wkn, 0xFF);
         }
+    } else {
 
-        invokedAllocateICESession = true;
-    }
+        multimap<String, SessionEntry>::iterator it;
 
-    if ((!invokedAllocateICESession) && (!invokedStartICEChecks)) {
-        // We do not return an ER_FAIL because it might be the case that we received the address candidates from a peer for
-        // a service or client that we have stopped advertising. Though there is also a possibility that there is a glitch
-        // in the message, we are ok with it because if the peer is really interested it would try to send candidates again
-        QCC_DbgPrintf(("DiscoveryManager::HandleAddressCandidatesResponse(): Neither the AllocateICESession nor the StartICEChecks callback was invoked\n"));
+        for (it = OutgoingICESessions.begin(); it != OutgoingICESessions.end(); it++) {
+
+            if (((it->first) == response.peerAddr)) {
+                // Populate the details in the ActiveOutgoingICESessions map
+                (it->second).serviceCandidates = response.candidates;
+                (it->second).ice_frag = response.ice_ufrag;
+                (it->second).ice_pwd = response.ice_pwd;
+
+                // Invoke the callback to inform the DaemonICETransport that the Service candiates have been received
+                ((it->second).peerListener)->SetPeerCandiates((it->second).serviceCandidates, response.ice_ufrag, response.ice_pwd);
+
+                // Remove the entry from the OutgoingICESessions
+                OutgoingICESessions.erase(it);
+
+                QCC_DbgPrintf(("DiscoveryManager::HandleAddressCandidatesResponse(): Invoking the StartICEChecks callback\n"));
+
+                // break out of the for loop
+                break;
+            }
+        }
+
     }
 
     return status;
@@ -2248,7 +2246,11 @@ void DiscoveryManager::HandlePersistentConnectionResponse(HttpConnection::HTTPRe
             InterfaceUpdateAlarm = NULL;
         }
 
-        InterfaceUpdateAlarm = new Alarm(INTERFACE_UPDATE_MIN_INTERVAL, this, 0, NULL);
+        uint32_t interfaceUpdateMinimumInterval = INTERFACE_UPDATE_MIN_INTERVAL;
+        qcc::AlarmListener* discoveryManagerListener = this;
+        void* context = NULL;
+        uint32_t zero = 0;
+        InterfaceUpdateAlarm = new Alarm(interfaceUpdateMinimumInterval, discoveryManagerListener, context, zero);
         status = DiscoveryManagerTimer.AddAlarm(*InterfaceUpdateAlarm);
 
         if (status != ER_OK) {
@@ -2611,7 +2613,11 @@ void DiscoveryManager::HandleOnDemandConnectionResponse(HttpConnection::HTTPResp
                 InterfaceUpdateAlarm = NULL;
             }
 
-            InterfaceUpdateAlarm = new Alarm(INTERFACE_UPDATE_MIN_INTERVAL, this, 0, NULL);
+            uint32_t interfaceUpdateMinimumInterval = INTERFACE_UPDATE_MIN_INTERVAL;
+            qcc::AlarmListener* discoveryManagerListener = this;
+            void* context = NULL;
+            uint32_t zero = 0;
+            InterfaceUpdateAlarm = new Alarm(interfaceUpdateMinimumInterval, discoveryManagerListener, context, zero);
             status = DiscoveryManagerTimer.AddAlarm(*InterfaceUpdateAlarm);
         }
 
@@ -2636,7 +2642,11 @@ void DiscoveryManager::HandleOnDemandConnectionResponse(HttpConnection::HTTPResp
             InterfaceUpdateAlarm = NULL;
         }
 
-        InterfaceUpdateAlarm = new Alarm(INTERFACE_UPDATE_MIN_INTERVAL, this, 0, NULL);
+        uint32_t interfaceUpdateMinimumInterval = INTERFACE_UPDATE_MIN_INTERVAL;
+        qcc::AlarmListener* discoveryManagerListener = this;
+        void* context = NULL;
+        uint32_t zero = 0;
+        InterfaceUpdateAlarm = new Alarm(interfaceUpdateMinimumInterval, discoveryManagerListener, context, zero);
         status = DiscoveryManagerTimer.AddAlarm(*InterfaceUpdateAlarm);
 
         if (status != ER_OK) {
@@ -3222,7 +3232,7 @@ void DiscoveryManager::GetUserCredentials(void)
     clientLoginBusListener = new ClientLoginBusListener();
     bus.RegisterBusListener(*clientLoginBusListener);
 
-    bool hasOwer;
+    bool hasOwer = false;
 
     while (true) {
         status = bus.NameHasOwner(ClientLoginServiceName.c_str(), hasOwer);

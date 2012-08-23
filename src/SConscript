@@ -15,10 +15,15 @@
 
 Import('env')
 Import('common_objs')
+from os.path import basename
 
 # AllJoyn Sources
 srcs = [ f for f in env.Glob('*.cc') + env.Glob('*.c')
          if not (str(f).endswith('version.cc')) ]
+
+winrt_status_srcs = [ 'Status_CPP0x.cc', 'StatusComment.cc' ]
+if env['OS_GROUP'] != 'winrt':
+    srcs = [ f for f in srcs if basename(str(f)) not in winrt_status_srcs ]
 
 # Platform specific sources
 if env['OS'] == 'darwin':
@@ -26,8 +31,9 @@ if env['OS'] == 'darwin':
 else:
     os_srcs = [ f for f in env.Glob(env['OS_GROUP'] + '/*.cc') ]
 
-if env['OS'] == 'android':
-    os_srcs += [env['OS_GROUP'] + '/' + env['OS'] + '/PermissionDB.cc']
+if env['OS'] == 'android' or env['OS'] == 'linux':
+    os_srcs += [ f for f in env.Glob(env['OS_GROUP'] + '/' + env['OS'] + '/*.cc')]
+
 
 alljoyn_core_objs = env.Object(srcs) + env.Object(os_srcs)
 objs = common_objs + alljoyn_core_objs 
@@ -36,7 +42,14 @@ version_cc = env.GenVersion('version')
 env.Depends(version_cc, objs)
 objs.append(env.Object(version_cc))
 
-# AllJoyn Static Library
-liballjoyn = env.StaticLibrary('alljoyn', objs)
+alljoyn_core_objs.append(env.Object(version_cc))
 
-Return('liballjoyn')
+if env['OS_GROUP'] == 'winrt':
+    liballjoyn=None
+    # winrt-specific build step
+    alljoyn_core_objs.append(env.SConscript(env['OS_GROUP'] + '/SConscript'));
+else:
+    # AllJoyn Static Library
+    liballjoyn = env.StaticLibrary('alljoyn', objs)
+
+Return ('liballjoyn','alljoyn_core_objs')

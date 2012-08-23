@@ -150,33 +150,46 @@ BusAttachment::Internal::~Internal()
     router = NULL;
 }
 
-class LocalTransportFactoryContainer : public TransportFactoryContainer {
+/*
+ * Transport factory container for transports this bus attachment uses to communicate with the daemon.
+ */
+static class ClientTransportFactoryContainer : public TransportFactoryContainer {
   public:
+
+    ClientTransportFactoryContainer() : transportInit(0) { }
+
     void Init()
     {
-        if (ClientTransport::IsAvailable()) {
-            Add(new TransportFactory<ClientTransport>(ClientTransport::TransportName, true));
-        }
-        if (NullTransport::IsAvailable()) {
-            Add(new TransportFactory<NullTransport>(NullTransport::TransportName, true));
+        /*
+         * Registration of transport factories is a one time operation.
+         */
+        if (IncrementAndFetch(&transportInit) == 1) {
+            if (ClientTransport::IsAvailable()) {
+                Add(new TransportFactory<ClientTransport>(ClientTransport::TransportName, true));
+            }
+            if (NullTransport::IsAvailable()) {
+                Add(new TransportFactory<NullTransport>(NullTransport::TransportName, true));
+            }
+        } else {
+            DecrementAndFetch(&transportInit);
         }
     }
-} localTransportsContainer;
-volatile int32_t transportContainerInit = 0;
+
+  private:
+    volatile int32_t transportInit;
+
+} clientTransportsContainer;
+
 
 BusAttachment::BusAttachment(const char* applicationName, bool allowRemoteMessages, uint32_t concurrency) :
     hasStarted(false),
     isStarted(false),
     isStopping(false),
     concurrency(concurrency),
-    busInternal(new Internal(applicationName, *this, localTransportsContainer, NULL, allowRemoteMessages, NULL)),
+    busInternal(new Internal(applicationName, *this, clientTransportsContainer, NULL, allowRemoteMessages, NULL)),
     joinObj(this)
 {
-    if (IncrementAndFetch(&transportContainerInit) == 1) {
-        localTransportsContainer.Init();
-    } else {
-        DecrementAndFetch(&transportContainerInit);         // adjust the count
-    }
+    clientTransportsContainer.Init();
     QCC_DbgTrace(("BusAttachment client constructor (%p)", this));
 }
 
@@ -188,11 +201,7 @@ BusAttachment::BusAttachment(Internal* busInternal, uint32_t concurrency) :
     busInternal(busInternal),
     joinObj(this)
 {
-    if (IncrementAndFetch(&transportContainerInit) == 1) {
-        localTransportsContainer.Init();
-    } else {
-        DecrementAndFetch(&transportContainerInit);         // adjust the count
-    }
+    clientTransportsContainer.Init();
     QCC_DbgTrace(("BusAttachment daemon constructor"));
 }
 
@@ -220,6 +229,30 @@ BusAttachment::~BusAttachment(void)
          */
         qcc::Sleep(1);
     }
+
+    /*
+     * Make sure that the ListenerUnregistered callback is called when the
+     * BusAttachment is being destroyed.
+     * clear the contents of the BusListener, SessionPortListeners, and
+     * SessionListeners before destroying the BusAttachment.
+     */
+    busInternal->listenersLock.Lock(MUTEX_CONTEXT);
+    Internal::ListenerSet::iterator it = busInternal->listeners.begin();
+    while (it != busInternal->listeners.end()) {
+        Internal::ProtectedBusListener l = *it;
+        busInternal->listeners.erase(it);
+        busInternal->listenersLock.Unlock(MUTEX_CONTEXT);
+        (*l)->ListenerUnregistered();
+        busInternal->listenersLock.Lock(MUTEX_CONTEXT);
+        it = busInternal->listeners.begin();
+    }
+
+    busInternal->listenersLock.Unlock(MUTEX_CONTEXT);
+
+    busInternal->sessionListenersLock.Lock(MUTEX_CONTEXT);
+    busInternal->sessionPortListeners.clear();
+    busInternal->sessionListeners.clear();
+    busInternal->sessionListenersLock.Unlock(MUTEX_CONTEXT);
 
     delete busInternal;
     busInternal = NULL;
@@ -377,6 +410,13 @@ QStatus BusAttachment::Connect(const char* connectSpec, BusEndpoint** newep)
                                                NULL);
             }
             if (ER_OK == status) {
+                assert(iface);
+                status = RegisterSignalHandler(busInternal,
+                                               static_cast<MessageReceiver::SignalHandler>(&BusAttachment::Internal::AllJoynSignalHandler),
+                                               iface->GetMember("PropertiesChanged"),
+                                               NULL);
+            }
+            if (ER_OK == status) {
                 Message reply(*this);
                 MsgArg arg("s", "type='signal',interface='org.alljoyn.Bus'");
                 const ProxyBusObject& dbusObj = this->GetDBusProxyObj();
@@ -452,6 +492,12 @@ QStatus BusAttachment::Disconnect(const char* connectSpec)
                 UnregisterSignalHandler(busInternal,
                                         static_cast<MessageReceiver::SignalHandler>(&BusAttachment::Internal::AllJoynSignalHandler),
                                         alljoynIface->GetMember("MPSessionChanged"),
+                                        NULL);
+            }
+            if (dbusIface) {
+                UnregisterSignalHandler(busInternal,
+                                        static_cast<MessageReceiver::SignalHandler>(&BusAttachment::Internal::AllJoynSignalHandler),
+                                        dbusIface->GetMember("PropertiesChanged"),
                                         NULL);
             }
         }
@@ -543,12 +589,6 @@ void BusAttachment::WaitStopInternal()
 
             isStarted = false;
             isStopping = false;
-
-            busInternal->listeners.clear();
-
-            busInternal->sessionPortListeners.clear();
-
-            busInternal->sessionListeners.clear();
         }
 
         busInternal->stopLock.Unlock(MUTEX_CONTEXT);
@@ -610,6 +650,11 @@ QStatus BusAttachment::RegisterKeyStoreListener(KeyStoreListener& listener)
     return busInternal->keyStore.SetListener(listener);
 }
 
+QStatus BusAttachment::UnregisterKeyStoreListener()
+{
+    return busInternal->keyStore.SetDefaultListener();
+}
+
 void BusAttachment::ClearKeyStore()
 {
     busInternal->keyStore.Clear();
@@ -668,7 +713,7 @@ QStatus BusAttachment::UnregisterAllHandlers(MessageReceiver* receiver)
 }
 
 bool BusAttachment::IsConnected() const {
-    return busInternal->router->IsBusRunning();
+    return busInternal->router && busInternal->router->IsBusRunning();
 }
 
 QStatus BusAttachment::RegisterBusObject(BusObject& obj) {
@@ -698,7 +743,13 @@ QStatus BusAttachment::EnablePeerSecurity(const char* authMechanisms,
             /* Validate the list of auth mechanisms */
             status =  busInternal->authManager.CheckNames(authMechanisms);
         }
+    } else {
+        status = busInternal->keyStore.Reset();
+        busInternal->authManager.UnregisterMechanism(AuthMechSRP::AuthName());
+        busInternal->authManager.UnregisterMechanism(AuthMechRSA::AuthName());
+        busInternal->authManager.UnregisterMechanism(AuthMechLogon::AuthName());
     }
+
     if (status == ER_OK) {
         AllJoynPeerObj* peerObj = busInternal->localEndpoint.GetPeerObj();
         if (peerObj) {
@@ -1624,6 +1675,38 @@ void BusAttachment::Internal::AllJoynSignalHandler(const InterfaceDescription::M
             } else {
                 sessionListenersLock.Unlock(MUTEX_CONTEXT);
             }
+        } else if (0 == strcmp("PropertiesChanged", msg->GetMemberName())) {
+            listenersLock.Lock(MUTEX_CONTEXT);
+            ListenerSet::iterator it = listeners.begin();
+
+            while (it != listeners.end()) {
+                ProtectedBusListener pl = *it;
+                listenersLock.Unlock(MUTEX_CONTEXT);
+
+                // first param: name of interface
+                // second param: array of <string=>variant> (ONE!)
+
+                // first get the ARRAY<STRUCT<STRING,VARIANT>>
+                MsgArg* entries;
+                size_t num;
+
+                args[1].Get("a{sv}", &num, &entries);
+                for (unsigned i = 0; i < num; ++i) {
+                    // changed params with values
+                    (*pl)->PropertyChanged(entries[i].v_dictEntry.key->v_string.str, entries[i].v_dictEntry.val);
+                }
+
+                args[2].Get("a{s}", &num, &entries);
+                for (unsigned i = 0; i < num; ++i) {
+                    // invalidated params
+                    (*pl)->PropertyChanged(entries[i].v_string.str, NULL);
+                }
+
+                listenersLock.Lock(MUTEX_CONTEXT);
+                it = listeners.upper_bound(pl);
+            }
+
+            listenersLock.Unlock(MUTEX_CONTEXT);
         } else {
             QCC_DbgPrintf(("Unrecognized signal \"%s.%s\" received", msg->GetInterface(), msg->GetMemberName()));
         }

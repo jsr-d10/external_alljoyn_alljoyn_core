@@ -1,0 +1,57 @@
+# Copyright 2012, Qualcomm Innovation Center, Inc.
+# 
+#    Licensed under the Apache License, Version 2.0 (the "License");
+#    you may not use this file except in compliance with the License.
+#    You may obtain a copy of the License at
+# 
+#        http://www.apache.org/licenses/LICENSE-2.0
+# 
+#    Unless required by applicable law or agreed to in writing, software
+#    distributed under the License is distributed on an "AS IS" BASIS,
+#    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#    See the License for the specific language governing permissions and
+#    limitations under the License.
+# 
+
+Import('env')
+from os.path import basename
+
+# Clone env so we don't pollute the shared environment
+locenv = env.Clone()
+
+# We want to generate documentation for the winrt binding
+# ${TARGET} places the .xdc files next to the .obj files.
+locenv.Append(CXXFLAGS='/doc${TARGET}.xdc');
+
+# Platform specific sources
+srcs = [ f for f in locenv.Glob('binding/src/*.cc') ]
+
+objs = locenv.Object(srcs);
+
+# Header file includes
+locenv.Prepend(CPPPATH = 'binding/inc')
+
+## Add support for multiple build targets in the same workset
+#locenv.VariantDir('$OBJDIR', '.', duplicate = 0)
+
+
+# put the AllJoyn.xml file next to the AllJoyn.winmd file in the dist directory
+XDCSourceDir = Dir('.').abspath
+XMLFileRoot = locenv.Dir('$DISTDIR\\bin\\AllJoyn').abspath
+XMLFile = locenv.File(XMLFileRoot+'.xml').abspath
+XDCTransformToolDir = locenv.Dir('binding').srcnode().abspath
+
+# run this after AllJoyn.dll has been built, and create AllJoyn.xml
+xml_file = locenv.Command(XMLFile,
+               '$DISTDIR\\bin\\AllJoyn.dll',
+               [
+               ''.join(['xdcmake.exe /old ', XMLFileRoot, ' /nologo /Fr', XDCSourceDir,'\\*.xdc']),
+               ''.join([XDCTransformToolDir, '\\TransformXDCOutput.py ', XMLFile, ' ', XMLFile, '.tmp ']),
+                Delete(XMLFile),
+                Move(XMLFile, XMLFile+'.tmp')
+               ]
+               )
+
+locenv.Depends(xml_file, objs)
+
+Return('objs')

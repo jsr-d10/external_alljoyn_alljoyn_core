@@ -207,6 +207,12 @@ class KeyStore {
     QStatus SetListener(KeyStoreListener& listener);
 
     /**
+     * Restores the default listener
+     *
+     */
+    QStatus SetDefaultListener();
+
+    /**
      * Get the name of the application that owns this key store.
      *
      * @return The application name.
@@ -219,6 +225,13 @@ class KeyStore {
      * @return  ER_OK if the key store was cleared.
      */
     QStatus Clear();
+
+    /**
+     * Reset the state of
+     *
+     * @return  ER_OK if the state was cleared
+     */
+    QStatus Reset();
 
     /**
      * Pull keys into the key store from a source.
