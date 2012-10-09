@@ -48,7 +48,9 @@
 #include <StunAttributeUseCandidate.h>
 #include <StunAttributeUsername.h>
 #include <StunAttributeXorMappedAddress.h>
+#include <StunAttributeAllocatedXorServerReflexiveAddress.h>
 #include <StunAttributeXorPeerAddress.h>
 #include <StunAttributeXorRelayedAddress.h>
+#include <StunAttributeIceCheckFlag.h>
 
 #endif

@@ -88,17 +88,33 @@ class InterfaceDescription {
         qcc::String signature;               /**< Method call IN arguments (NULL for signals) */
         qcc::String returnSignature;         /**< Signal or method call OUT arguments */
         qcc::String argNames;                /**< Comma separated list of argument names - can be NULL */
-        qcc::ManagedObj<AnnotationsMap> annotations;           /**< Map of annotations */
+        AnnotationsMap* annotations;           /**< Map of annotations */
         qcc::String accessPerms;              /**< Required permissions to invoke this call */
 
         /** %Member constructor */
         Member(const InterfaceDescription* iface, AllJoynMessageType type, const char* name,
                const char* signature, const char* returnSignature, const char* argNames, uint8_t annotation, const char* accessPerms);
 
+        /** %Member copy constructor */
+        Member(const Member& other);
+
+        /** %Member destructor */
+        ~Member();
+
         /**
-         * Check if this member has a given annotation with a given value
-         * @param name   Name of the annotation to look for
-         * @param value  Value to compare with
+         * Get the names and values of all annotations
+         *
+         * @param[out] names    Annotation names
+         * @param[out] values    Annotation values
+         * @param      size     Number of annotations to get
+         * @return              The number of annotations returned or the total number of annotations if props is NULL.
+         */
+        size_t GetAnnotations(qcc::String* names = NULL, qcc::String* values = NULL, size_t size = 0) const;
+
+        /**
+         * Get this member's annotation value
+         * @param name   name of the annotation to look for
+         * @param[out]   value  The value of the annotation, if found
          * @return    true iff annotations[name] == value
          */
         bool GetAnnotation(const qcc::String& name, qcc::String& value) const;
@@ -118,10 +134,32 @@ class InterfaceDescription {
         qcc::String name;              /**< %Property name */
         qcc::String signature;         /**< %Property type */
         uint8_t access;                /**< Access is #PROP_ACCESS_READ, #PROP_ACCESS_WRITE, or #PROP_ACCESS_RW */
-        qcc::ManagedObj<AnnotationsMap> annotations;    /**< Map of annotations */
+        AnnotationsMap* annotations;    /**< Map of annotations */
 
-        /** Property constructor */
+        /** %Property constructor */
         Property(const char* name, const char* signature, uint8_t access);
+        /** %Property copy constructor */
+        Property(const Property& other);
+        /** %Property destructor*/
+        ~Property();
+
+        /**
+         * Get the names and values of all annotations
+         *
+         * @param[out] names    Annotation names
+         * @param[out] values    Annotation values
+         * @param      size     Number of annotations to get
+         * @return              The number of annotations returned or the total number of annotations if props is NULL.
+         */
+        size_t GetAnnotations(qcc::String* names = NULL, qcc::String* values = NULL, size_t size = 0) const;
+
+        /**
+         * Get this property's annotation value
+         * @param name   name of the annotation to look for
+         * @param[out]   value  The value of the annotation, if found
+         * @return    true iff annotations[name] == value
+         */
+        bool GetAnnotation(const qcc::String& name, qcc::String& value) const;
 
         /** Equality */
         bool operator==(const Property& o) const;
@@ -372,6 +410,15 @@ class InterfaceDescription {
      */
     bool GetAnnotation(const qcc::String& name, qcc::String& value) const;
 
+    /**
+     * Get the names and values of all annotations
+     *
+     * @param[out] names    Annotation names
+     * @param[out] values    Annotation values
+     * @param[out] size     Number of annotations
+     * @return              The number of annotations returned or the total number of annotations if props is NULL.
+     */
+    size_t GetAnnotations(qcc::String* names = NULL, qcc::String* values = NULL, size_t size = 0) const;
 
     /**
      * Returns a description of the interface in introspection XML format

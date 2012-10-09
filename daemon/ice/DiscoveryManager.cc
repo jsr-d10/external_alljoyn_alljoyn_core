@@ -75,8 +75,8 @@ namespace ajn {
 //
 const char* DiscoveryManager::INTERFACES_WILDCARD = "*";
 
-DiscoveryManager::DiscoveryManager(BusAttachment& bus)
-    : Thread("DiscoveryManager"),
+DiscoveryManager::DiscoveryManager(BusAttachment& bus) :
+    Thread("DiscoveryManager"),
     bus(bus),
     ClientLoginServiceName(String("org.alljoyn.ice.clientloginservice")),
     ClientLoginServiceObject(String("/ClientLoginService")),
@@ -84,6 +84,7 @@ DiscoveryManager::DiscoveryManager(BusAttachment& bus)
     GetAccountPasswordMethod(String("GetClientAccountPassword")),
     PeerID(),
     PeerAddr(),
+    LastOnDemandMessageSent(NULL),
     DiscoveryManagerState(IMPL_SHUTDOWN),
     PersistentIdentifier(),
     InterfaceFlags(NONE),
@@ -104,6 +105,8 @@ DiscoveryManager::DiscoveryManager(BusAttachment& bus)
     OnDemandMessageSentTimeStamp(0),
     SentMessageOverOnDemandConnection(false),
     LastSentUpdateMessage(INVALID_MESSAGE),
+    GETMessage(GET_MESSAGE, HttpConnection::METHOD_GET),
+    RendezvousSessionDeleteMessage(RENDEZVOUS_SESSION_DELETE, HttpConnection::METHOD_DELETE),
     SCRAMAuthModule(),
     ProximityScanner(NULL),
     ClientAuthenticationFailed(false),
@@ -112,7 +115,9 @@ DiscoveryManager::DiscoveryManager(BusAttachment& bus)
     SentFirstGETMessage(false),
     userCredentials(),
     UseHTTP(false),
-    EnableIPv6(false)
+    EnableIPv6(false),
+    clientLoginBusListener(NULL),
+    clientLoginRemoteObj(NULL)
 {
     QCC_DbgPrintf(("DiscoveryManager::DiscoveryManager()\n"));
 
@@ -150,13 +155,6 @@ DiscoveryManager::DiscoveryManager(BusAttachment& bus)
 
     QCC_DbgPrintf(("DiscoveryManager::DiscoveryManager(): RendezvousServer = %s\n", RendezvousServer.c_str()));
 
-    /* Compose the GET message and the Rendezvous Session Delete messages */
-    GETMessage.httpMethod = HttpConnection::METHOD_GET;
-    GETMessage.messageType = GET_MESSAGE;
-
-    RendezvousSessionDeleteMessage.httpMethod = HttpConnection::METHOD_DELETE;
-    RendezvousSessionDeleteMessage.messageType = RENDEZVOUS_SESSION_DELETE;
-
     /* Initialize the keep alive timer value to the default value */
     SetTKeepAlive(T_KEEP_ALIVE_MIN_IN_SECS);
 
@@ -177,7 +175,7 @@ DiscoveryManager::DiscoveryManager(BusAttachment& bus)
     tempSentBTMACList.clear();
     lastSentBTMACList.clear();
 
-    OutboundMessageQueue.clear();
+    ClearOutboundMessageQueue();
 
 #ifdef ENABLE_PROXIMITY_FRAMEWORK
     /* Initialize the ProximityScanEngine */
@@ -188,6 +186,10 @@ DiscoveryManager::DiscoveryManager(BusAttachment& bus)
     // to derive proximity information from the kernel is available.
     InitializeProximity();
 #endif
+
+    clientLoginBusListener = new ClientLoginBusListener();
+    this->bus.RegisterBusListener(*clientLoginBusListener);
+    clientLoginRemoteObj = new ProxyBusObject(bus, ClientLoginServiceName.c_str(), ClientLoginServiceObject.c_str(), 0);
 }
 
 DiscoveryManager::~DiscoveryManager()
@@ -245,7 +247,28 @@ DiscoveryManager::~DiscoveryManager()
         iceCallback = NULL;
     }
 
-    delete InterfaceUpdateAlarm;
+    if (InterfaceUpdateAlarm) {
+        delete InterfaceUpdateAlarm;
+        InterfaceUpdateAlarm = NULL;
+    }
+
+    if (clientLoginRemoteObj) {
+        delete clientLoginRemoteObj;
+        clientLoginRemoteObj = NULL;
+    }
+
+    if (clientLoginBusListener) {
+        bus.UnregisterBusListener(*clientLoginBusListener);
+        delete clientLoginBusListener;
+        clientLoginBusListener = NULL;
+    }
+
+    if (LastOnDemandMessageSent) {
+        delete LastOnDemandMessageSent;
+        LastOnDemandMessageSent = NULL;
+    }
+
+    ClearOutboundMessageQueue();
 
     DiscoveryManagerState = IMPL_SHUTDOWN;
 }
@@ -259,8 +282,10 @@ void DiscoveryManager::Disconnect(void)
         Connection->Disconnect();
         delete Connection;
         Connection = NULL;
-
-        LastOnDemandMessageSent.Clear();
+    }
+    if (LastOnDemandMessageSent) {
+        delete LastOnDemandMessageSent;
+        LastOnDemandMessageSent = NULL;
     }
 }
 
@@ -344,25 +369,23 @@ void DiscoveryManager::SetCallback(Callback<void, CallbackType, const String&, c
     DiscoveryManagerMutex.Unlock(MUTEX_CONTEXT);
 }
 
-void DiscoveryManager::ComposeAdvertisementorSearch(bool advertisement, HttpConnection::Method httpMethod, RendezvousMessage& message)
+void DiscoveryManager::ComposeAdvertisementorSearch(bool advertisement, InterfaceMessage& message)
 {
     QCC_DbgPrintf(("DiscoveryManager::ComposeAdvertisementorSearch()\n"));
 
     list<String> tempCurrentList = currentAdvertiseList;
     list<String>* tempSentList = &tempSentAdvertiseList;
-    message.messageType = ADVERTISEMENT;
 
     if (!advertisement) {
         tempCurrentList = currentSearchList;
         tempSentList = &tempSentSearchList;
-        message.messageType = SEARCH;
         QCC_DbgPrintf(("DiscoveryManager::ComposeAdvertisementorSearch(): Called for sending a Search message"));
     } else {
         QCC_DbgPrintf(("DiscoveryManager::ComposeAdvertisementorSearch(): Called for sending an Advertisement message"));
     }
 
     /* Return if the current list is empty as we have nothing to send */
-    if (tempCurrentList.empty() && (httpMethod != HttpConnection::METHOD_DELETE)) {
+    if (tempCurrentList.empty() && (message.httpMethod != HttpConnection::METHOD_DELETE)) {
         message.messageType = INVALID_MESSAGE;
         return;
     }
@@ -372,40 +395,29 @@ void DiscoveryManager::ComposeAdvertisementorSearch(bool advertisement, HttpConn
     tempSentList->clear();
     *tempSentList = tempCurrentList;
 
-    if (httpMethod != HttpConnection::METHOD_DELETE) {
+    if (message.httpMethod != HttpConnection::METHOD_DELETE) {
         //
-        // Compose an Advertisement/Search RendezvousMessage
+        // Compose an Advertisement/Search InterfaceMessage
         //
         if (advertisement) {
-
-            AdvertiseMessage* advertise = new AdvertiseMessage();
+            AdvertiseMessage& advertise = static_cast<AdvertiseMessage&>(message);
             Advertisement adv;
-
             while (!tempCurrentList.empty()) {
                 adv.service = tempCurrentList.front();
-                advertise->ads.push_back(adv);
+                advertise.ads.push_back(adv);
                 tempCurrentList.pop_front();
             }
-
-            message.interfaceMessage = static_cast<InterfaceMessage*>(advertise);
-
         } else {
 
-            SearchMessage* searchMsg = new SearchMessage();
-
+            SearchMessage& searchMsg = static_cast<SearchMessage&>(message);
             Search search;
             while (!tempCurrentList.empty()) {
                 search.service = tempCurrentList.front();
-                searchMsg->search.push_back(search);
+                searchMsg.search.push_back(search);
                 tempCurrentList.pop_front();
             }
-
-            message.interfaceMessage = static_cast<InterfaceMessage*>(searchMsg);
-
         }
     }
-
-    message.httpMethod = httpMethod;
 }
 
 QStatus DiscoveryManager::AdvertiseName(const String& name)
@@ -451,10 +463,8 @@ QStatus DiscoveryManager::AdvertiseName(const String& name)
         ClientAuthenticationFailed = false;
     }
 
-    HttpConnection::Method httpMethod = HttpConnection::METHOD_POST;
-
-    RendezvousMessage message;
-    ComposeAdvertisementorSearch(true, httpMethod, message);
+    AdvertiseMessage message;
+    ComposeAdvertisementorSearch(true, message);
 
     //
     // Queue this message for transmission out to the Rendezvous Server.
@@ -512,10 +522,8 @@ QStatus DiscoveryManager::SearchName(const String& name)
         ClientAuthenticationFailed = false;
     }
 
-    HttpConnection::Method httpMethod = HttpConnection::METHOD_POST;
-
-    RendezvousMessage message;
-    ComposeAdvertisementorSearch(false, httpMethod, message);
+    SearchMessage message;
+    ComposeAdvertisementorSearch(false, message);
 
     //
     // Queue this message for transmission out to the Rendezvous Server.
@@ -559,14 +567,12 @@ QStatus DiscoveryManager::CancelAdvertiseName(const String& name)
                 // If there are no entries in the list, it means that we are
                 // deleting all Advertisements/Searches. So use
                 // DELETE. Otherwise use POST.
-                HttpConnection::Method httpMethod = HttpConnection::METHOD_POST;
-
+                AdvertiseMessage message;
                 if (currentAdvertiseList.empty()) {
-                    httpMethod = HttpConnection::METHOD_DELETE;
+                    message.httpMethod = HttpConnection::METHOD_DELETE;
                 }
 
-                RendezvousMessage message;
-                ComposeAdvertisementorSearch(true, httpMethod, message);
+                ComposeAdvertisementorSearch(true, message);
 
                 //
                 // Queue this message for transmission out to the Rendezvous Server.
@@ -653,14 +659,12 @@ QStatus DiscoveryManager::CancelSearchName(const String& name)
             // If there are no entries in the list, it means that we are
             // deleting all Advertisements/Searches. So use
             // DELETE. Otherwise use POST.
-            HttpConnection::Method httpMethod = HttpConnection::METHOD_POST;
-
+            SearchMessage message;
             if (currentSearchList.empty()) {
-                httpMethod = HttpConnection::METHOD_DELETE;
+                message.httpMethod = HttpConnection::METHOD_DELETE;
             }
 
-            RendezvousMessage message;
-            ComposeAdvertisementorSearch(false, httpMethod, message);
+            ComposeAdvertisementorSearch(false, message);
 
             //
             // Queue this message for transmission out to the Rendezvous Server.
@@ -726,16 +730,10 @@ QStatus DiscoveryManager::GetSTUNInfo(bool client, String remotePeerId, STUNServ
 
 QStatus DiscoveryManager::QueueICEAddressCandidatesMessage(bool client, std::pair<String, SessionEntry> sessionDetail)
 {
-    RendezvousMessage message;
-
-    message.messageType = ADDRESS_CANDIDATES;
-    message.httpMethod = HttpConnection::METHOD_POST;
-
-    ICECandidatesMessage* addressCandidates = new ICECandidatesMessage();
-
-    addressCandidates->ice_ufrag = sessionDetail.second.ice_frag;
-    addressCandidates->ice_pwd = sessionDetail.second.ice_pwd;
-    addressCandidates->destinationPeerID = sessionDetail.first;
+    ICECandidatesMessage message;
+    message.ice_ufrag = sessionDetail.second.ice_frag;
+    message.ice_pwd = sessionDetail.second.ice_pwd;
+    message.destinationPeerID = sessionDetail.first;
 
     //
     // If a client is sending the address candidate message, then
@@ -746,8 +744,8 @@ QStatus DiscoveryManager::QueueICEAddressCandidatesMessage(bool client, std::pai
     //
     if (client) {
 
-        addressCandidates->candidates = sessionDetail.second.clientCandidates;
-        addressCandidates->requestToAddSTUNInfo = sessionDetail.second.AddSTUNInfo;
+        message.candidates = sessionDetail.second.clientCandidates;
+        message.requestToAddSTUNInfo = sessionDetail.second.AddSTUNInfo;
 
         // We just go ahead and directly populate the session request details in OutgoingICESessions. We do not
         // care if a same entry already exists in the map. This is because it is perfectly valid to have two
@@ -758,7 +756,7 @@ QStatus DiscoveryManager::QueueICEAddressCandidatesMessage(bool client, std::pai
 
     } else {
 
-        addressCandidates->candidates = sessionDetail.second.serviceCandidates;
+        message.candidates = sessionDetail.second.serviceCandidates;
         multimap<String, SessionEntry>::iterator it;
         DiscoveryManagerMutex.Lock(MUTEX_CONTEXT);
         for (it = IncomingICESessions.begin(); it != IncomingICESessions.end(); it++) {
@@ -768,8 +766,6 @@ QStatus DiscoveryManager::QueueICEAddressCandidatesMessage(bool client, std::pai
         }
         DiscoveryManagerMutex.Unlock(MUTEX_CONTEXT);
     }
-
-    message.interfaceMessage = static_cast<InterfaceMessage*>(addressCandidates);
 
     //
     // Queue this message for transmission out to the Rendezvous Server.
@@ -813,7 +809,7 @@ void DiscoveryManager::RemoveSessionDetailFromMap(bool client, std::pair<String,
 }
 
 
-QStatus DiscoveryManager::QueueProximityMessage(ProximityMessage proximity, list<String> bssids, list<String> btMacIds)
+QStatus DiscoveryManager::QueueProximityMessage(ProximityMessage& message, list<String> bssids, list<String> btMacIds)
 {
 
     QCC_DbgPrintf(("DiscoveryManager::QueueProximityMessage(): Queueing proximity message"));
@@ -821,15 +817,6 @@ QStatus DiscoveryManager::QueueProximityMessage(ProximityMessage proximity, list
     DiscoveryManagerMutex.Lock(MUTEX_CONTEXT);
     /* Queue a proximity message only if we have active advertisements and searches */
     if (((!(currentAdvertiseList.empty()))) || ((!(currentSearchList.empty())))) {
-        RendezvousMessage message;
-
-        message.messageType = PROXIMITY;
-        message.httpMethod = HttpConnection::METHOD_POST;
-
-        ProximityMessage* proximityMsg = new ProximityMessage();
-        *proximityMsg = proximity;
-
-        message.interfaceMessage = static_cast<InterfaceMessage*>(proximityMsg);
 
         /* Update the lists */
         currentBSSIDList = bssids;
@@ -851,11 +838,9 @@ QStatus DiscoveryManager::QueueProximityMessage(ProximityMessage proximity, list
     return ER_OK;
 }
 
-void DiscoveryManager::ComposeProximityMessage(HttpConnection::Method httpMethod, RendezvousMessage& message)
+void DiscoveryManager::ComposeProximityMessage(ProximityMessage& message)
 {
     QCC_DbgPrintf(("DiscoveryManager::ComposeProximityMessage()"));
-
-    ProximityMessage* proximityMsg = new ProximityMessage();
 
 #ifdef ENABLE_PROXIMITY_FRAMEWORK
 
@@ -867,14 +852,12 @@ void DiscoveryManager::ComposeProximityMessage(HttpConnection::Method httpMethod
 
     /* Get the current Proximity information */
     if (ProximityScanner) {
-        *proximityMsg = ProximityScanner->GetScanResults(currentBSSIDList, currentBTMACList);
+        message = ProximityScanner->GetScanResults(currentBSSIDList, currentBTMACList);
     }
 #else
-    *proximityMsg = proximity[currentProximityIndex];
+    message = proximity[currentProximityIndex];
     currentProximityIndex = ((currentProximityIndex + 1) % 3);
 #endif
-
-    message.messageType = PROXIMITY;
 
     /* Clear the temporary sent lists and populate them with the content of the current lists */
     tempSentBSSIDList.clear();
@@ -882,10 +865,6 @@ void DiscoveryManager::ComposeProximityMessage(HttpConnection::Method httpMethod
 
     tempSentBSSIDList = currentBSSIDList;
     tempSentBTMACList = currentBTMACList;
-
-    /* Compose the message */
-    message.interfaceMessage = static_cast<InterfaceMessage*>(proximityMsg);
-    message.httpMethod = httpMethod;
 }
 
 QStatus DiscoveryManager::Connect(void)
@@ -930,8 +909,6 @@ void* DiscoveryManager::Run(void* arg)
     // environment.
     //
     QCC_DbgPrintf(("DiscoveryManager::Run()\n"));
-
-    RendezvousMessage message;
 
     QStatus status;
 
@@ -1010,7 +987,10 @@ void* DiscoveryManager::Run(void* arg)
                          * and add it to checkEvents */
                         if (Connection->GetOnDemandConnectionChanged()) {
 
-                            LastOnDemandMessageSent.Clear();
+                            if (LastOnDemandMessageSent) {
+                                delete LastOnDemandMessageSent;
+                                LastOnDemandMessageSent = NULL;
+                            }
                             SentMessageOverOnDemandConnection = false;
 
                             Connection->ResetOnDemandConnectionChanged();
@@ -1111,7 +1091,7 @@ void* DiscoveryManager::Run(void* arg)
                 //
                 if (!(Connection)) {
 
-                    OutboundMessageQueue.clear();
+                    ClearOutboundMessageQueue();
 
                     if (InterfaceUpdateAlarm) {
                         DiscoveryManagerTimer.RemoveAlarm(*InterfaceUpdateAlarm);
@@ -1149,7 +1129,7 @@ void* DiscoveryManager::Run(void* arg)
                         /* If the ClientAuthenticationRequiredFlag is set, we need to perform the client login procedure */
                         if ((PeerID.empty()) || (ClientAuthenticationRequiredFlag)) {
 
-                            if (LastOnDemandMessageSent.messageType != CLIENT_LOGIN) {
+                            if (!LastOnDemandMessageSent || (LastOnDemandMessageSent->messageType != CLIENT_LOGIN)) {
                                 DiscoveryManagerMutex.Unlock(MUTEX_CONTEXT);
                                 status = SendClientLoginFirstRequest();
                                 DiscoveryManagerMutex.Lock(MUTEX_CONTEXT);
@@ -1283,13 +1263,13 @@ void* DiscoveryManager::Run(void* arg)
 
                                         QCC_DbgPrintf(("DiscoveryManager::Run(): Messages about to be sent to Rendezvous Server\n"));
 
-                                        message = OutboundMessageQueue.front();
+                                        InterfaceMessage* message = OutboundMessageQueue.front();
 
                                         //
                                         // Send messages over to the Rendezvous Server.
                                         //
-                                        if (message.messageType != INVALID_MESSAGE) {
-                                            status = SendMessage(message);
+                                        if (message->messageType != INVALID_MESSAGE) {
+                                            status = SendMessage(*message);
 
                                             //
                                             // If we are unable to send the message, disconnect from the Server and then set ForceInterfaceUpdateFlag.
@@ -1311,15 +1291,14 @@ void* DiscoveryManager::Run(void* arg)
                                                 }
                                                 DiscoveryManagerMutex.Lock(MUTEX_CONTEXT);
 #endif
-
                                                 ForceInterfaceUpdateFlag = true;
 
                                             } else {
                                                 //
                                                 // The current message has been sent to the Rendezvous Server.
                                                 // So we can discard it.
-                                                //
                                                 OutboundMessageQueue.pop_front();
+                                                delete message;
                                             }
                                         } else {
                                             //
@@ -1327,6 +1306,7 @@ void* DiscoveryManager::Run(void* arg)
                                             // So we can discard it.
                                             //
                                             OutboundMessageQueue.pop_front();
+                                            delete message;
                                         }
                                     }
                                 }
@@ -1626,14 +1606,14 @@ void* DiscoveryManager::Run(void* arg)
 /**
  * Ensure that the function invoking this function locks the DiscoveryManagerMutex.
  */
-void DiscoveryManager::QueueMessage(RendezvousMessage message)
+void DiscoveryManager::QueueMessage(InterfaceMessage& message)
 {
     QCC_DbgPrintf(("DiscoveryManager::QueueMessage(): messageType(%s) httpMethod(%d)\n",
                    (PrintMessageType(message.messageType)).c_str(), message.httpMethod));
 
     if (message.messageType != INVALID_MESSAGE) {
 
-        OutboundMessageQueue.push_back(message);
+        OutboundMessageQueue.push_back(message.Clone());
         QCC_DbgPrintf(("DiscoveryManager::QueueMessage: Set the wake event\n"));
         WakeEvent.SetEvent();
     }
@@ -1643,8 +1623,9 @@ void DiscoveryManager::PurgeOutboundMessageQueue(MessageType messageType)
 {
     QCC_DbgPrintf(("DiscoveryManager::PurgeOutboundMessageQueue(): OutboundMessageQueue.size() = %d", OutboundMessageQueue.size()));
 
-    for (list<RendezvousMessage>::iterator i = OutboundMessageQueue.begin(); i != OutboundMessageQueue.end();) {
-        if ((*i).messageType == messageType) {
+    for (list<InterfaceMessage*>::iterator i = OutboundMessageQueue.begin(); i != OutboundMessageQueue.end();) {
+        if ((*i)->messageType == messageType) {
+            delete *i;
             OutboundMessageQueue.erase(i++);
         } else {
             ++i;
@@ -1652,7 +1633,7 @@ void DiscoveryManager::PurgeOutboundMessageQueue(MessageType messageType)
     }
 }
 
-QStatus DiscoveryManager::SendMessage(RendezvousMessage message)
+QStatus DiscoveryManager::SendMessage(InterfaceMessage& message)
 {
     QStatus status = ER_OK;
 
@@ -1662,13 +1643,12 @@ QStatus DiscoveryManager::SendMessage(RendezvousMessage message)
 
         QCC_DbgPrintf(("DiscoveryManager::SendMessage(): Sending %s message\n", PrintMessageType(message.messageType).c_str()));
 
-        HttpConnection::Method httpMethod;
         String uri;
         bool contentPresent = false;
         String content;
 
         /* Prepare the HTTP message */
-        status = PrepareOutgoingMessage(message, httpMethod, uri, contentPresent, content);
+        status = PrepareOutgoingMessage(message, uri, contentPresent, content);
 
         if (ER_OK != status) {
             QCC_LogError(status, ("DiscoveryManager::SendMessage(): PrepareOutgoingMessage() failed"));
@@ -1684,11 +1664,11 @@ QStatus DiscoveryManager::SendMessage(RendezvousMessage message)
 
                 bool sendMessageOverPersistentConnection = false;
 
-                if ((httpMethod == HttpConnection::METHOD_GET) && (message.messageType != TOKEN_REFRESH)) {
+                if ((message.httpMethod == HttpConnection::METHOD_GET) && (message.messageType != TOKEN_REFRESH)) {
                     sendMessageOverPersistentConnection = true;
                 }
 
-                status = Connection->SendMessage(sendMessageOverPersistentConnection, httpMethod, uri, contentPresent, content);
+                status = Connection->SendMessage(sendMessageOverPersistentConnection, message.httpMethod, uri, contentPresent, content);
 
                 if (ER_OK == status) {
                     QCC_DbgPrintf(("DiscoveryManager::SendMessage(): Connection->SendMessage() returned ER_OK"));
@@ -1697,8 +1677,10 @@ QStatus DiscoveryManager::SendMessage(RendezvousMessage message)
                      * the message that was just sent and also update the appropriate time stamp to indicate when
                      * a message was sent to the Server*/
                     if (!sendMessageOverPersistentConnection) {
-                        LastOnDemandMessageSent.Clear();
-                        LastOnDemandMessageSent = message;
+                        if (LastOnDemandMessageSent) {
+                            delete LastOnDemandMessageSent;
+                        }
+                        LastOnDemandMessageSent = message.Clone();
                         OnDemandMessageSentTimeStamp = GetTimestamp();
                         SentMessageOverOnDemandConnection = true;
                     } else {
@@ -2087,19 +2069,17 @@ QStatus DiscoveryManager::HandlePersistentMessageResponse(Json::Value payload)
         //
         // Iterate through the responses
         //
-        list<Response>::iterator resp_it;
+        while (!response.msgs.empty()) {
 
-        for (resp_it = response.msgs.begin(); resp_it != response.msgs.end(); resp_it++) {
+            if (response.msgs.front().type != INVALID_RESPONSE) {
 
-            if (resp_it->type != INVALID_RESPONSE) {
-
-                QCC_DbgPrintf(("DiscoveryManager::HandlePersistentMessageResponse(): type = %s\n", PrintResponseType(resp_it->type).c_str()));
+                QCC_DbgPrintf(("DiscoveryManager::HandlePersistentMessageResponse(): type = %s\n", PrintResponseType(response.msgs.front().type).c_str()));
                 //
                 // Requested service(s) has been found. Handle it
                 // by invoking the Found callback
                 //
-                if (resp_it->type == SEARCH_MATCH_RESPONSE) {
-                    SearchMatchResponse* SearchMatch = static_cast<SearchMatchResponse*>(resp_it->response);
+                if (response.msgs.front().type == SEARCH_MATCH_RESPONSE) {
+                    SearchMatchResponse* SearchMatch = static_cast<SearchMatchResponse*>(response.msgs.front().response);
 
                     if (ER_OK != HandleSearchMatchResponse(*SearchMatch)) {
                         status = ER_INVALID_PERSISTENT_CONNECTION_MESSAGE_RESPONSE;
@@ -2111,8 +2091,8 @@ QStatus DiscoveryManager::HandlePersistentMessageResponse(Json::Value payload)
                 // by invoking the Found callback and setting ttl=0 so that the
                 // entry is removed from the nameMap
                 //
-                else if (resp_it->type == MATCH_REVOKED_RESPONSE) {
-                    MatchRevokedResponse* MatchRevoked = static_cast<MatchRevokedResponse*>(resp_it->response);
+                else if (response.msgs.front().type == MATCH_REVOKED_RESPONSE) {
+                    MatchRevokedResponse* MatchRevoked = static_cast<MatchRevokedResponse*>(response.msgs.front().response);
 
                     if (ER_OK != HandleMatchRevokedResponse(*MatchRevoked)) {
                         status = ER_INVALID_PERSISTENT_CONNECTION_MESSAGE_RESPONSE;
@@ -2124,8 +2104,8 @@ QStatus DiscoveryManager::HandlePersistentMessageResponse(Json::Value payload)
                 // Handle it by invoking the AllocateICESession or StartICEChecks
                 // callback accordingly.
                 //
-                else if (resp_it->type == ADDRESS_CANDIDATES_RESPONSE) {
-                    AddressCandidatesResponse* AddressCandidates = static_cast<AddressCandidatesResponse*>(resp_it->response);
+                else if (response.msgs.front().type == ADDRESS_CANDIDATES_RESPONSE) {
+                    AddressCandidatesResponse* AddressCandidates = static_cast<AddressCandidatesResponse*>(response.msgs.front().response);
 
                     if (ER_OK != HandleAddressCandidatesResponse(*AddressCandidates)) {
                         status = ER_INVALID_PERSISTENT_CONNECTION_MESSAGE_RESPONSE;
@@ -2136,8 +2116,8 @@ QStatus DiscoveryManager::HandlePersistentMessageResponse(Json::Value payload)
                 // Start ICE checks response has been received.
                 // Handle it accordingly.
                 //
-                else if (resp_it->type ==  START_ICE_CHECKS_RESPONSE) {
-                    StartICEChecksResponse* StartICEChecks = static_cast<StartICEChecksResponse*>(resp_it->response);
+                else if (response.msgs.front().type ==  START_ICE_CHECKS_RESPONSE) {
+                    StartICEChecksResponse* StartICEChecks = static_cast<StartICEChecksResponse*>(response.msgs.front().response);
 
                     if (ER_OK != HandleStartICEChecksResponse(*StartICEChecks)) {
                         status = ER_INVALID_PERSISTENT_CONNECTION_MESSAGE_RESPONSE;
@@ -2151,6 +2131,9 @@ QStatus DiscoveryManager::HandlePersistentMessageResponse(Json::Value payload)
                 status = ER_INVALID_PERSISTENT_CONNECTION_MESSAGE_RESPONSE;
                 QCC_LogError(status, ("DiscoveryManager::HandlePersistentMessageResponse(): %s", QCC_StatusText(status)));
             }
+
+            response.msgs.front().Clear();
+            response.msgs.pop_front();
         }
     }
 
@@ -2343,7 +2326,7 @@ QStatus DiscoveryManager::UpdateInformationOnServer(MessageType messageType, boo
 #endif
     } else {
         status = ER_FAIL;
-        QCC_DbgPrintf(("DiscoveryManager::UpdateInformationOnServer(): Invalid RendezvousMessage Type %d", messageType));
+        QCC_DbgPrintf(("DiscoveryManager::UpdateInformationOnServer(): Invalid InterfaceMessage Type %d", messageType));
     }
 
     if (status == ER_OK) {
@@ -2409,26 +2392,33 @@ QStatus DiscoveryManager::UpdateInformationOnServer(MessageType messageType, boo
 #endif
         }
 
-        RendezvousMessage message;
-
         if (hasChanged) {
             if (messageType == ADVERTISEMENT) {
-                ComposeAdvertisementorSearch(true, httpMethod, message);
+                AdvertiseMessage advMsg;
+                ComposeAdvertisementorSearch(true, advMsg);
+                if (advMsg.messageType != INVALID_MESSAGE) {
+                    status = SendMessage(advMsg);
+                }
             } else if (messageType == SEARCH) {
-                ComposeAdvertisementorSearch(false, httpMethod, message);
+                SearchMessage searchMsg;
+                ComposeAdvertisementorSearch(false, searchMsg);
+                if (searchMsg.messageType != INVALID_MESSAGE) {
+                    status = SendMessage(searchMsg);
+                }
             } else if (messageType == PROXIMITY) {
-                ComposeProximityMessage(httpMethod, message);
+                ProximityMessage proxMsg;
+                ComposeProximityMessage(proxMsg);
+                if (proxMsg.messageType != INVALID_MESSAGE) {
+                    status = SendMessage(proxMsg);
+                }
+            } else {
+                status = ER_UNABLE_TO_SEND_MESSAGE_TO_RENDEZVOUS_SERVER;
             }
 
-            if (message.messageType != INVALID_MESSAGE) {
-                status = SendMessage(message);
-
-                if (status == ER_OK) {
-                    QCC_DbgPrintf(("DiscoveryManager::UpdateInformationOnServer(): Successfully sent the message to the Server"));
-                } else {
-                    status = ER_UNABLE_TO_SEND_MESSAGE_TO_RENDEZVOUS_SERVER;
-                    QCC_LogError(status, ("DiscoveryManager::UpdateInformationOnServer(): %s", QCC_StatusText(status)));
-                }
+            if (status == ER_OK) {
+                QCC_DbgPrintf(("DiscoveryManager::UpdateInformationOnServer(): Successfully sent the message to the Server"));
+            } else {
+                QCC_LogError(status, ("DiscoveryManager::UpdateInformationOnServer(): %s", QCC_StatusText(status)));
             }
         }
     }
@@ -2452,8 +2442,8 @@ QStatus DiscoveryManager::HandleOnDemandMessageResponse(Json::Value payload)
         if (response.peerID != PeerID) {
             status = ER_INVALID_ON_DEMAND_CONNECTION_MESSAGE_RESPONSE;
             QCC_LogError(status, ("DiscoveryManager::HandleOnDemandMessageResponse(): PeerID(%s) in the received response does not match with the one assigned to this daemon(%s)", response.peerID.c_str(), PeerID.c_str()));
-        } else {
-            switch (LastOnDemandMessageSent.messageType) {
+        } else if (LastOnDemandMessageSent) {
+            switch (LastOnDemandMessageSent->messageType) {
             case ADVERTISEMENT:
                 // Update the last sent advertisement list with the contents of the temp sent advertisement list
                 lastSentAdvertiseList.clear();
@@ -2480,7 +2470,8 @@ QStatus DiscoveryManager::HandleOnDemandMessageResponse(Json::Value payload)
             case CLIENT_LOGIN:
             case TOKEN_REFRESH:
                 status = ER_FAIL;
-                QCC_LogError(status, ("DiscoveryManager::HandleOnDemandMessageResponse(): Cannot handle response for %s message in this function", PrintMessageType(LastOnDemandMessageSent.messageType).c_str()));
+                QCC_LogError(status, ("DiscoveryManager::HandleOnDemandMessageResponse(): Cannot handle response for %s message in this function",
+                                      PrintMessageType(LastOnDemandMessageSent ? LastOnDemandMessageSent->messageType : INVALID_MESSAGE).c_str()));
                 break;
 
             case RENDEZVOUS_SESSION_DELETE:
@@ -2515,7 +2506,7 @@ void DiscoveryManager::HandleOnDemandConnectionResponse(HttpConnection::HTTPResp
         if (response.payloadPresent) {
 
             /* If the sent message was the the Client Login message, handle it accordingly */
-            if (LastOnDemandMessageSent.messageType == CLIENT_LOGIN) {
+            if (LastOnDemandMessageSent && (LastOnDemandMessageSent->messageType == CLIENT_LOGIN)) {
                 status = HandleClientLoginResponse(response.payload);
 
                 if (status != ER_OK) {
@@ -2530,7 +2521,7 @@ void DiscoveryManager::HandleOnDemandConnectionResponse(HttpConnection::HTTPResp
 
                     ForceInterfaceUpdateFlag = true;
                 }
-            } else if (LastOnDemandMessageSent.messageType == TOKEN_REFRESH) {
+            } else if (LastOnDemandMessageSent && (LastOnDemandMessageSent->messageType == TOKEN_REFRESH)) {
                 status = HandleTokenRefreshResponse(response.payload);
 
                 if (status != ER_OK) {
@@ -2568,7 +2559,7 @@ void DiscoveryManager::HandleOnDemandConnectionResponse(HttpConnection::HTTPResp
 
             /* We can receive a 200 OK with no payload on the On Demand connection only if the sent request was a
              * DELETE request */
-            if (LastOnDemandMessageSent.httpMethod != HttpConnection::METHOD_DELETE) {
+            if (!LastOnDemandMessageSent || (LastOnDemandMessageSent->httpMethod != HttpConnection::METHOD_DELETE)) {
 
                 status = ER_INVALID_ON_DEMAND_CONNECTION_MESSAGE_RESPONSE;
                 QCC_LogError(status, ("DiscoveryManager::HandleOnDemandConnectionResponse(): Response with no payload received for a message that was not a DELETE request"));
@@ -2664,16 +2655,11 @@ QStatus DiscoveryManager::SendClientLoginFirstRequest(void)
 {
     QCC_DbgPrintf(("DiscoveryManager::SendClientLoginFirstRequest()"));
 
-    RendezvousMessage message;
+    ClientLoginRequest loginRequest;
 
-    message.httpMethod = HttpConnection::METHOD_POST;
-    message.messageType = CLIENT_LOGIN;
-
-    ClientLoginRequest* loginRequest = new ClientLoginRequest();
-
-    loginRequest->firstMessage = true;
-    loginRequest->daemonID = PersistentIdentifier;
-    loginRequest->mechanism = SCRAM_SHA_1_MECHANISM;
+    loginRequest.firstMessage = true;
+    loginRequest.daemonID = PersistentIdentifier;
+    loginRequest.mechanism = SCRAM_SHA_1_MECHANISM;
 
     /* Reset the SCRAMAuthModule to clear the obsolete values */
     SCRAMAuthModule.Reset();
@@ -2684,12 +2670,10 @@ QStatus DiscoveryManager::SendClientLoginFirstRequest(void)
     /* Set the user credentials in the SCRAM module */
     SCRAMAuthModule.SetUserCredentials(userCredentials.userName, userCredentials.userPassword);
 
-    loginRequest->message = SCRAMAuthModule.GenerateClientLoginFirstSASLMessage();
-
-    message.interfaceMessage = static_cast<InterfaceMessage*>(loginRequest);
+    loginRequest.message = SCRAMAuthModule.GenerateClientLoginFirstSASLMessage();
 
     /* Send the message to the Server */
-    QStatus status = SendMessage(message);
+    QStatus status = SendMessage(loginRequest);
 
     if (status == ER_OK) {
         QCC_DbgPrintf(("DiscoveryManager::SendClientLoginFirstRequest(): Successfully sent the Client Registration First Message to the Server"));
@@ -2705,26 +2689,19 @@ QStatus DiscoveryManager::SendClientLoginFinalRequest(void)
 {
     QCC_DbgPrintf(("DiscoveryManager::SendClientLoginFinalRequest()"));
 
-    RendezvousMessage message;
+    ClientLoginRequest loginRequest;
 
-    message.httpMethod = HttpConnection::METHOD_POST;
-    message.messageType = CLIENT_LOGIN;
-
-    ClientLoginRequest* loginRequest = new ClientLoginRequest();
-
-    loginRequest->firstMessage = false;
-    loginRequest->daemonID = PersistentIdentifier;
+    loginRequest.firstMessage = false;
+    loginRequest.daemonID = PersistentIdentifier;
     if (PeerID.empty()) {
-        loginRequest->clearClientState = true;
+        loginRequest.clearClientState = true;
     }
-    loginRequest->mechanism = SCRAM_SHA_1_MECHANISM;
+    loginRequest.mechanism = SCRAM_SHA_1_MECHANISM;
 
-    loginRequest->message = SCRAMAuthModule.GenerateClientLoginFinalSASLMessage();
-
-    message.interfaceMessage = static_cast<InterfaceMessage*>(loginRequest);
+    loginRequest.message = SCRAMAuthModule.GenerateClientLoginFinalSASLMessage();
 
     /* Send the message to the Server */
-    QStatus status = SendMessage(message);
+    QStatus status = SendMessage(loginRequest);
 
     if (status == ER_OK) {
         QCC_DbgPrintf(("DiscoveryManager::SendClientLoginFirstRequest(): Successfully sent the Client Registration Final Message to the Server"));
@@ -2827,11 +2804,11 @@ QStatus DiscoveryManager::HandleClientLoginResponse(Json::Value payload)
 
     QCC_DbgPrintf(("DiscoveryManager::HandleClientLoginResponse()"));
 
-    if (LastOnDemandMessageSent.messageType != CLIENT_LOGIN) {
+    if (!LastOnDemandMessageSent || (LastOnDemandMessageSent->messageType != CLIENT_LOGIN)) {
         status = ER_INVALID_ON_DEMAND_CONNECTION_MESSAGE_RESPONSE;
         QCC_LogError(status, ("DiscoveryManager::HandleClientLoginResponse(): Sent message was not a client login request"));
     } else {
-        ClientLoginRequest* loginRequest = static_cast<ClientLoginRequest*>(LastOnDemandMessageSent.interfaceMessage);
+        ClientLoginRequest* loginRequest = static_cast<ClientLoginRequest*>(LastOnDemandMessageSent);
 
         QCC_DbgPrintf(("DiscoveryManager::HandleClientLoginResponse(): firstMessage = %d", loginRequest->firstMessage));
 
@@ -2895,7 +2872,7 @@ QStatus DiscoveryManager::HandleTokenRefreshResponse(Json::Value payload)
 
     QCC_DbgPrintf(("DiscoveryManager::HandleTokenRefreshResponse()"));
 
-    if (LastOnDemandMessageSent.messageType != TOKEN_REFRESH) {
+    if (!LastOnDemandMessageSent || (LastOnDemandMessageSent->messageType != TOKEN_REFRESH)) {
         status = ER_INVALID_ON_DEMAND_CONNECTION_MESSAGE_RESPONSE;
         QCC_LogError(status, ("DiscoveryManager::HandleTokenRefreshResponse(): Sent message was not a token refresh message"));
     } else {
@@ -2904,7 +2881,7 @@ QStatus DiscoveryManager::HandleTokenRefreshResponse(Json::Value payload)
         status = ParseTokenRefreshResponse(payload, response);
 
         if (status == ER_OK) {
-            TokenRefreshMessage* refreshMsg = static_cast<TokenRefreshMessage*>(LastOnDemandMessageSent.interfaceMessage);
+            TokenRefreshMessage* refreshMsg = static_cast<TokenRefreshMessage*>(LastOnDemandMessageSent);
 
             QCC_DbgPrintf(("DiscoveryManager::HandleTokenRefreshResponse(): client = %d", refreshMsg->client));
 
@@ -2976,37 +2953,35 @@ QStatus DiscoveryManager::HandleTokenRefreshResponse(Json::Value payload)
     return status;
 }
 
-QStatus DiscoveryManager::PrepareOutgoingMessage(RendezvousMessage message, HttpConnection::Method& httpMethod, String& uri, bool& contentPresent, String& content)
+QStatus DiscoveryManager::PrepareOutgoingMessage(InterfaceMessage& message, String& uri, bool& contentPresent, String& content)
 {
     QStatus status = ER_OK;
 
     QCC_DbgPrintf(("DiscoveryManager::PrepareOutgoingMessage(): messageType(%s)", PrintMessageType(message.messageType).c_str()));
 
-    httpMethod = message.httpMethod;
-
     if (message.messageType == ADVERTISEMENT) {
         uri = GetAdvertisementUri(PeerID);
 
-        if (httpMethod != HttpConnection::METHOD_DELETE) {
-            AdvertiseMessage* advertise = static_cast<AdvertiseMessage*>(message.interfaceMessage);
-            content = GenerateJSONAdvertisement(*advertise);
+        if (message.httpMethod != HttpConnection::METHOD_DELETE) {
+            AdvertiseMessage& advertise = static_cast<AdvertiseMessage&>(message);
+            content = GenerateJSONAdvertisement(advertise);
             contentPresent = true;
         }
     } else if (message.messageType == SEARCH) {
         uri = GetSearchUri(PeerID);
 
-        if (httpMethod != HttpConnection::METHOD_DELETE) {
-            SearchMessage* search = static_cast<SearchMessage*>(message.interfaceMessage);
-            content = GenerateJSONSearch(*search);
+        if (message.httpMethod != HttpConnection::METHOD_DELETE) {
+            SearchMessage& search = static_cast<SearchMessage&>(message);
+            content = GenerateJSONSearch(search);
             contentPresent = true;
         }
     } else if (message.messageType == PROXIMITY) {
 
         /* Proximity is sent only using POST or PUT HTTP method */
-        if (httpMethod != HttpConnection::METHOD_DELETE) {
+        if (message.httpMethod != HttpConnection::METHOD_DELETE) {
             uri = GetProximityUri(PeerID);
-            ProximityMessage* proximityMsg = static_cast<ProximityMessage*>(message.interfaceMessage);
-            content = GenerateJSONProximity(*proximityMsg);
+            ProximityMessage& proximityMsg = static_cast<ProximityMessage&>(message);
+            content = GenerateJSONProximity(proximityMsg);
             contentPresent = true;
         } else {
             status = ER_INVALID_HTTP_METHOD_USED_FOR_RENDEZVOUS_SERVER_INTERFACE_MESSAGE;
@@ -3017,10 +2992,10 @@ QStatus DiscoveryManager::PrepareOutgoingMessage(RendezvousMessage message, Http
     } else if (message.messageType == ADDRESS_CANDIDATES) {
 
         /* Address Candidates is sent only using POST HTTP method */
-        if (httpMethod == HttpConnection::METHOD_POST) {
-            ICECandidatesMessage* adressCandMsg = static_cast<ICECandidatesMessage*>(message.interfaceMessage);
-            uri = GetAddressCandidatesUri(PeerID, adressCandMsg->destinationPeerID, adressCandMsg->requestToAddSTUNInfo);
-            content = GenerateJSONCandidates(*adressCandMsg);
+        if (message.httpMethod == HttpConnection::METHOD_POST) {
+            ICECandidatesMessage& adressCandMsg = static_cast<ICECandidatesMessage&>(message);
+            uri = GetAddressCandidatesUri(PeerID, adressCandMsg.destinationPeerID, adressCandMsg.requestToAddSTUNInfo);
+            content = GenerateJSONCandidates(adressCandMsg);
             contentPresent = true;
         } else {
             status = ER_INVALID_HTTP_METHOD_USED_FOR_RENDEZVOUS_SERVER_INTERFACE_MESSAGE;
@@ -3030,7 +3005,7 @@ QStatus DiscoveryManager::PrepareOutgoingMessage(RendezvousMessage message, Http
         }
     } else if (message.messageType == RENDEZVOUS_SESSION_DELETE) {
         /* Rendezvous Session Delete is sent only using DELETE HTTP method */
-        if (httpMethod == HttpConnection::METHOD_DELETE) {
+        if (message.httpMethod == HttpConnection::METHOD_DELETE) {
             uri = GetRendezvousSessionDeleteUri(PeerID);
         } else {
             status = ER_INVALID_HTTP_METHOD_USED_FOR_RENDEZVOUS_SERVER_INTERFACE_MESSAGE;
@@ -3040,7 +3015,7 @@ QStatus DiscoveryManager::PrepareOutgoingMessage(RendezvousMessage message, Http
         }
     } else if (message.messageType == GET_MESSAGE) {
         /* GET Messages is sent only using GET HTTP method */
-        if (httpMethod == HttpConnection::METHOD_GET) {
+        if (message.httpMethod == HttpConnection::METHOD_GET) {
             uri = GetGETUri(PeerID);
         } else {
             status = ER_INVALID_HTTP_METHOD_USED_FOR_RENDEZVOUS_SERVER_INTERFACE_MESSAGE;
@@ -3050,10 +3025,10 @@ QStatus DiscoveryManager::PrepareOutgoingMessage(RendezvousMessage message, Http
         }
     } else if (message.messageType == CLIENT_LOGIN) {
         /* Client Login is sent only using POST HTTP method */
-        if (httpMethod == HttpConnection::METHOD_POST) {
+        if (message.httpMethod == HttpConnection::METHOD_POST) {
             uri = GetClientLoginUri();
-            ClientLoginRequest* loginMsg = static_cast<ClientLoginRequest*>(message.interfaceMessage);
-            content = GenerateJSONClientLoginRequest(*loginMsg);
+            ClientLoginRequest& loginMsg = static_cast<ClientLoginRequest&>(message);
+            content = GenerateJSONClientLoginRequest(loginMsg);
             contentPresent = true;
         } else {
             status = ER_INVALID_HTTP_METHOD_USED_FOR_RENDEZVOUS_SERVER_INTERFACE_MESSAGE;
@@ -3063,10 +3038,10 @@ QStatus DiscoveryManager::PrepareOutgoingMessage(RendezvousMessage message, Http
         }
     } else if (message.messageType == DAEMON_REGISTRATION) {
         /* Daemon Registration is sent only using POST HTTP method */
-        if (httpMethod == HttpConnection::METHOD_POST) {
+        if (message.httpMethod == HttpConnection::METHOD_POST) {
             uri = GetDaemonRegistrationUri(PeerID);
-            DaemonRegistrationMessage* regMsg = static_cast<DaemonRegistrationMessage*>(message.interfaceMessage);
-            content = GenerateJSONDaemonRegistrationMessage(*regMsg);
+            DaemonRegistrationMessage& regMsg = static_cast<DaemonRegistrationMessage&>(message);
+            content = GenerateJSONDaemonRegistrationMessage(regMsg);
             contentPresent = true;
         } else {
             status = ER_INVALID_HTTP_METHOD_USED_FOR_RENDEZVOUS_SERVER_INTERFACE_MESSAGE;
@@ -3076,7 +3051,7 @@ QStatus DiscoveryManager::PrepareOutgoingMessage(RendezvousMessage message, Http
         }
     } else if (message.messageType == TOKEN_REFRESH) {
         /* Token Refresh Message is sent only using GET HTTP method */
-        if (httpMethod == HttpConnection::METHOD_GET) {
+        if (message.httpMethod == HttpConnection::METHOD_GET) {
             uri = GetTokenRefreshUri(PeerID);
         } else {
             status = ER_INVALID_HTTP_METHOD_USED_FOR_RENDEZVOUS_SERVER_INTERFACE_MESSAGE;
@@ -3114,27 +3089,20 @@ QStatus DiscoveryManager::SendDaemonRegistrationMessage(void)
     QCC_DbgPrintf(("DiscoveryManager::SendDaemonRegistrationMessage()"));
 
     /* Construct the Daemon Registration Message */
-    RendezvousMessage message;
+    DaemonRegistrationMessage regMsg;
 
-    message.httpMethod = HttpConnection::METHOD_POST;
-    message.messageType = DAEMON_REGISTRATION;
-
-    DaemonRegistrationMessage* regMsg = new DaemonRegistrationMessage();
-
-    regMsg->daemonID = PersistentIdentifier;
-    regMsg->daemonVersion = String(GetVersion());
+    regMsg.daemonID = PersistentIdentifier;
+    regMsg.daemonVersion = String(GetVersion());
 
     // PPN - Populate later
-    regMsg->devMake = String();
-    regMsg->devModel = String();
-    regMsg->osVersion = String();
+    regMsg.devMake = String();
+    regMsg.devModel = String();
+    regMsg.osVersion = String();
 
-    regMsg->osType = qcc::GetSystemOSType();
-
-    message.interfaceMessage = static_cast<InterfaceMessage*>(regMsg);
+    regMsg.osType = qcc::GetSystemOSType();
 
     /* Send the message to the Server */
-    QStatus status = SendMessage(message);
+    QStatus status = SendMessage(regMsg);
 
     if (status == ER_OK) {
         QCC_DbgPrintf(("DiscoveryManager::SendDaemonRegistrationMessage(): Successfully sent the Daemon Registration Message to the Server"));
@@ -3195,27 +3163,19 @@ void DiscoveryManager::AlarmTriggered(const qcc::Alarm& alarm, QStatus status)
 {
     QCC_DbgPrintf(("DiscoveryManager::AlarmTriggered()"));
 
-    DiscoveryManagerMutex.Lock(MUTEX_CONTEXT);
-    /* Set the ForceInterfaceUpdateFlag to update the interfaces and set the wake event to wake the DiscoveryManager thread */
-    ForceInterfaceUpdateFlag = true;
-    WakeEvent.SetEvent();
-    DiscoveryManagerMutex.Unlock(MUTEX_CONTEXT);
-}
-
-class ClientLoginBusListener : public BusListener, public SessionListener {
-  public:
-    ClientLoginBusListener() : BusListener(), sessionId(0) { }
-
-    void FoundAdvertisedName(const char* name, TransportMask transport, const char* namePrefix)
-    {
-        QCC_DbgPrintf(("ClientLoginBusListener::FoundAdvertisedName(): Found the service"));
+    /*
+     * We need to check (status == ER_OK) here because we should not be
+     * waking up the discovery manager thread if the alarm has been triggered
+     * during the shutdown of the timer.
+     */
+    if (status == ER_OK) {
+        DiscoveryManagerMutex.Lock(MUTEX_CONTEXT);
+        /* Set the ForceInterfaceUpdateFlag to update the interfaces and set the wake event to wake the DiscoveryManager thread */
+        ForceInterfaceUpdateFlag = true;
+        WakeEvent.SetEvent();
+        DiscoveryManagerMutex.Unlock(MUTEX_CONTEXT);
     }
-
-    SessionId GetSessionId() const { return sessionId; }
-
-  private:
-    SessionId sessionId;
-};
+}
 
 void DiscoveryManager::GetUserCredentials(void)
 {
@@ -3224,42 +3184,46 @@ void DiscoveryManager::GetUserCredentials(void)
     String userName = String("");
     String password = String(" ");
 
-    QStatus status;
+    QStatus status = ER_OK;
 
     /* Read the user credentials from the Client Login Interface */
-    ClientLoginBusListener* clientLoginBusListener;
-
-    clientLoginBusListener = new ClientLoginBusListener();
-    bus.RegisterBusListener(*clientLoginBusListener);
-
-    bool hasOwer = false;
-
-    while (true) {
-        status = bus.NameHasOwner(ClientLoginServiceName.c_str(), hasOwer);
-        if (ER_OK != status) {
-            QCC_LogError(status, ("DiscoveryManager::GetUserCredentials(): NameHasOwner failed"));
-        }
-        if (hasOwer) {
-            QCC_DbgPrintf(("DiscoveryManager::GetUserCredentials(): Successfully connected to %s", ClientLoginServiceName.c_str()));
-            break;
-        } else {
-            QCC_DbgPrintf(("DiscoveryManager::GetUserCredentials(): No %s owner found yet", ClientLoginServiceName.c_str()));
-            return;
-        }
+    if (!clientLoginBusListener) {
+        QCC_LogError(status, ("DiscoveryManager::GetUserCredentials(): Unable to setup an ClientLoginBusListener object"));
+        return;
     }
 
-    ProxyBusObject* remoteObj = new ProxyBusObject(bus, ClientLoginServiceName.c_str(), ClientLoginServiceObject.c_str(), 0);
+    bool hasOwner = false;
 
-    status = remoteObj->IntrospectRemoteObject();
+    status = bus.NameHasOwner(ClientLoginServiceName.c_str(), hasOwner);
+
+    if (ER_OK != status) {
+        QCC_LogError(status, ("DiscoveryManager::GetUserCredentials(): NameHasOwner failed"));
+        return;
+    }
+
+    if (hasOwner) {
+        QCC_DbgPrintf(("DiscoveryManager::GetUserCredentials(): Successfully connected to %s", ClientLoginServiceName.c_str()));
+    } else {
+        QCC_DbgPrintf(("DiscoveryManager::GetUserCredentials(): No %s owner found yet", ClientLoginServiceName.c_str()));
+        return;
+    }
+
+    if (!clientLoginRemoteObj) {
+        QCC_LogError(status, ("DiscoveryManager::GetUserCredentials(): Unable to setup an ProxyBusObject object"));
+        return;
+    }
+
+    status = clientLoginRemoteObj->IntrospectRemoteObject();
     if (ER_OK != status) {
         QCC_LogError(status, ("DiscoveryManager::GetUserCredentials(): Problem introspecting the remote object %s", ClientLoginServiceObject.c_str()));
+        return;
     } else {
         QCC_DbgPrintf(("DiscoveryManager::GetUserCredentials(): Introspection on the remote object %s successful", ClientLoginServiceObject.c_str()));
     }
 
     // Call the remote method GetClientAccountName on the service
     Message userNameReply(bus);
-    status = remoteObj->MethodCall(ClientLoginServiceName.c_str(), GetAccountNameMethod.c_str(), NULL, 0, userNameReply, 35000);
+    status = clientLoginRemoteObj->MethodCall(ClientLoginServiceName.c_str(), GetAccountNameMethod.c_str(), NULL, 0, userNameReply, 35000);
     if (ER_OK != status) {
         QCC_LogError(status, ("DiscoveryManager::GetUserCredentials(): Issue calling method %s on the remote object", GetAccountNameMethod.c_str()));
         qcc::String errorMsg;
@@ -3276,10 +3240,12 @@ void DiscoveryManager::GetUserCredentials(void)
     status = userNameArgs->Get("s", &userNameArgSize, &userNameArg);
     if (ER_OK != status) {
         QCC_LogError(status, ("DiscoveryManager::GetUserCredentials(): Error while unmarshalling the string received from the service %s", ClientLoginServiceName.c_str()));
+        return;
     } else {
         status = userNameArg->Get("s", &userName);
         if (ER_OK != status) {
             QCC_LogError(status, ("DiscoveryManager::GetUserCredentials(): Error while getting the value for expected signature = %s", userNameArg->Signature().c_str()));
+            return;
         } else {
             QCC_DbgPrintf(("DiscoveryManager::GetUserCredentials(): userName = %s", userName.c_str()));
         }
@@ -3287,7 +3253,7 @@ void DiscoveryManager::GetUserCredentials(void)
 
     // Call the remote method GetClientAccountPassword on the service
     Message passwordReply(bus);
-    status = remoteObj->MethodCall(ClientLoginServiceName.c_str(), GetAccountPasswordMethod.c_str(), NULL, 0, passwordReply, 35000);
+    status = clientLoginRemoteObj->MethodCall(ClientLoginServiceName.c_str(), GetAccountPasswordMethod.c_str(), NULL, 0, passwordReply, 35000);
     if (ER_OK != status) {
         QCC_LogError(status, ("DiscoveryManager::GetUserCredentials(): Issue calling method %s on the remote object", GetAccountNameMethod.c_str()));
         qcc::String errorMsg;
@@ -3304,10 +3270,12 @@ void DiscoveryManager::GetUserCredentials(void)
     status = passwordArgs->Get("s", &passwordArgSize, &passwordArg);
     if (ER_OK != status) {
         QCC_LogError(status, ("DiscoveryManager::GetUserCredentials(): Error while unmarshalling the string received from the service %s", ClientLoginServiceName.c_str()));
+        return;
     } else {
         status = passwordArg->Get("s", &password);
         if (ER_OK != status) {
             QCC_LogError(status, ("DiscoveryManager::GetUserCredentials(): Error while getting the value for expected signature = %s", passwordArg->Signature().c_str()));
+            return;
         } else {
             QCC_DbgPrintf(("DiscoveryManager::GetUserCredentials(): password = %s", password.c_str()));
         }
@@ -3316,23 +3284,12 @@ void DiscoveryManager::GetUserCredentials(void)
     userCredentials.SetCredentials(userName, password);
 }
 
-void DiscoveryManager::ComposeAndQueueTokenRefreshMessage(TokenRefreshMessage refreshMessage)
+void DiscoveryManager::ComposeAndQueueTokenRefreshMessage(TokenRefreshMessage& refreshMessage)
 {
     QCC_DbgPrintf(("DiscoveryManager::ComposeAndQueueTokenRefreshMessage()"));
 
-    /* Construct the Daemon Registration Message */
-    RendezvousMessage message;
-
-    message.httpMethod = HttpConnection::METHOD_GET;
-    message.messageType = TOKEN_REFRESH;
-
-    TokenRefreshMessage* refMsg = new TokenRefreshMessage();
-    *refMsg = refreshMessage;
-
-    message.interfaceMessage = static_cast<InterfaceMessage*>(refMsg);
-
     DiscoveryManagerMutex.Lock(MUTEX_CONTEXT);
-    QueueMessage(message);
+    QueueMessage(refreshMessage);
     DiscoveryManagerMutex.Unlock(MUTEX_CONTEXT);
 }
 
@@ -3376,6 +3333,14 @@ void DiscoveryManager::GetRendezvousConnIPAddresses(IPAddress& onDemandAddress, 
         Connection->GetRendezvousConnIPAddresses(onDemandAddress, persistentAddress);
     } else {
         QCC_DbgPrintf(("DiscoveryManager::GetRendezvousConnIPAddresses(): Not connected to the Server"));
+    }
+}
+
+void DiscoveryManager::ClearOutboundMessageQueue(void)
+{
+    while (!OutboundMessageQueue.empty()) {
+        delete OutboundMessageQueue.front();
+        OutboundMessageQueue.pop_front();
     }
 }
 

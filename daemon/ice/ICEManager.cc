@@ -65,9 +65,10 @@ QStatus ICEManager::AllocateSession(bool addHostCandidates,
 {
     QStatus status = ER_OK;
 
-    session = new ICESession(addHostCandidates, addRelayedCandidates, listener, stunInfo, onDemandAddress, persistentAddress);
+    session = new ICESession(addHostCandidates, addRelayedCandidates, listener,
+                             stunInfo, onDemandAddress, persistentAddress, enableIpv6);
 
-    status = session->Init(enableIpv6);
+    status = session->Init();
 
     if (ER_OK == status) {
         lock.Lock();                // Synch with another thread potentially calling destructor.
@@ -91,13 +92,15 @@ QStatus ICEManager::DeallocateSession(ICESession*& session)
 
     assert(session != NULL);
 
-    // remove from list
-    lock.Lock();                // Synch with another thread potentially calling destructor.
-                                // Not likely because this is a singleton, but...
-    sessions.remove(session);
-    lock.Unlock();
+    if (session != NULL) {
+        // remove from list
+        lock.Lock();                // Synch with another thread potentially calling destructor.
+                                    // Not likely because this is a singleton, but...
+        sessions.remove(session);
+        lock.Unlock();
 
-    delete session;
+        delete session;
+    }
 
     return status;
 }

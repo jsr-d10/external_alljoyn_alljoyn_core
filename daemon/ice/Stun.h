@@ -75,6 +75,7 @@ class Stun {
          STUNServerInfo stunInfo,
          const uint8_t* key,
          size_t keyLen,
+         size_t mtu,
          bool autoFraming = true
          );
 
@@ -376,6 +377,22 @@ class Stun {
      */
     size_t GetHMACKeyLength(void) const { return hmacKeyLen; }
 
+    /**
+     * Set the local server reflexive candidate details
+     */
+    void SetLocalSrflxCandidate(IPEndpoint& srflxCandidate) {
+        localSrflxCandidate.addr = srflxCandidate.addr;
+        localSrflxCandidate.port = srflxCandidate.port;
+    }
+
+    /**
+     * Get the local server reflexive candidate details
+     */
+    void GetLocalSrflxCandidate(IPAddress& addr, uint16_t& port) {
+        addr = localSrflxCandidate.addr;
+        port = localSrflxCandidate.port;
+    }
+
   private:
     struct StunBuffer {
         uint8_t* storage;
@@ -412,6 +429,8 @@ class Stun {
     IPAddress localAddr;   ///< Local host address.
     uint16_t localPort;    ///< Local port.
 
+    IPEndpoint localSrflxCandidate;   ///< Local Server Reflexive candidate.
+
     SocketFd sockfd;       ///< Socket file descriptor.
     SocketType type;     ///< Socket type.
 
@@ -443,11 +462,6 @@ class Stun {
     STUNServerInfo STUNInfo;
 
     /**
-     * Sets the maximal MTU for the interface corresponding to the ipAddress.
-     */
-    void SetMaxMTU(IPAddress ipAddress);
-
-    /**
      * Internal constructor used when accepting a connection.
      *
      * @param sockfd        Socket descriptor of the new socket connection.
@@ -466,25 +480,6 @@ class Stun {
     void ReceiveUDP(void);
 
     static ThreadReturn STDCALL RxThread(void*arg);
-
-
-    /**
-     * Received framed data from a TCP stream.  This can be either a STUN
-     * message or Application data.  'frameBuf' is allocated with the 'new'
-     * operator and the caller is expected to use 'delete[]' to release the
-     * memory but only if rxLeftoverBuf does not point to the same memory
-     * address as frameBuf.
-     *
-     * @param frameBuf      OUT: Pointer where the frame (including the
-     *                           prepended frame length) will be stored.
-     * @param frameBufSize  OUT: Number of octets allocated for frameBuf.
-     * @param frameLen      OUT: Number of octets in the frame (does not count
-     *                           the octets containing the frame length).
-     *
-     * @return  Indication of success or failure.
-     */
-    QStatus RecvFramedBuffer(uint8_t*& frameBuf, size_t& frameBufSize, size_t& frameLen);
-
 
     /**
      * Process leftover framed STUN message (direct TCP connection only).

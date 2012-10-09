@@ -357,6 +357,7 @@ void PacketEngine::AlarmTriggered(const Alarm& alarm, QStatus reason)
 {
     AlarmContext* ctx = reinterpret_cast<AlarmContext*>(alarm->GetContext());
     //printf("rx(%d): AlarmTriggered cctx=%d\n", (GetTimestamp() / 100) % 100000, ctx->contextType);
+
     switch (ctx->contextType) {
     case AlarmContext::CONTEXT_DISCONNECT_REQ:
     {
@@ -510,6 +511,7 @@ void PacketEngine::AlarmTriggered(const Alarm& alarm, QStatus reason)
             ci->state = ChannelInfo::CLOSED;
             ReleaseChannelInfo(*ci);
         }
+        break;
     }
 
     default:
@@ -686,6 +688,13 @@ PacketEngine::ChannelInfo::~ChannelInfo()
         engine.timer.RemoveAlarm(xOnAlarm);
         delete ac;
     }
+
+    txLock.Lock();
+    while (!txControlQueue.empty()) {
+        engine.pool.ReturnPacket(txControlQueue.front());
+        txControlQueue.pop_front();
+    }
+    txLock.Unlock();
 
     delete ackAlarmContext;
     delete[] rxPackets;
@@ -1426,7 +1435,9 @@ void PacketEngine::RxPacketThread::HandleXOn(Packet* controlPacket)
         /* Update txDrain */
         ci->txLock.Lock();
         uint16_t cnt = 0;
-        AdvanceTxDrain(*ci, remRxAck, cnt);
+        if (IN_WINDOW(uint16_t, ci->txDrain, numeric_limits<uint16_t>::max() >> 1, remRxAck)) {
+            AdvanceTxDrain(*ci, remRxAck, cnt);
+        }
 
         /* Update remoteRxDrain */
         bool sendXonAck = false;
@@ -1504,6 +1515,7 @@ qcc::ThreadReturn STDCALL PacketEngine::TxPacketThread::Run(void* arg)
                     if (letoh32(p->payload[0]) == PACKET_COMMAND_DISCONNECT_RSP) {
                         QCC_DbgPrintf(("PacketEngine::TxThread: Send DisconnectRsp. Closing id=0x%x", ci->id));
                         ci->state = ChannelInfo::CLOSED;
+                        engine->pool.ReturnPacket(p);
                         break;
                     }
                     engine->pool.ReturnPacket(p);

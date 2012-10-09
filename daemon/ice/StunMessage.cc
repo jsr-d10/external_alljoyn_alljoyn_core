@@ -157,6 +157,10 @@ static QStatus ParseAttribute(const StunMessage& msg,
         attr = new StunAttributeUseCandidate();
         break;
 
+    case STUN_ATTR_ICE_CHECK_FLAG:
+        attr = new StunAttributeIceCheckFlag();
+        break;
+
     case STUN_ATTR_ICE_CONTROLLED:
         attr = new StunAttributeIceControlled();
         break;
@@ -175,6 +179,10 @@ static QStatus ParseAttribute(const StunMessage& msg,
 
     case STUN_ATTR_XOR_PEER_ADDRESS:
         attr = new StunAttributeXorPeerAddress(msg);
+        break;
+
+    case STUN_ATTR_ALLOCATED_XOR_SERVER_REFLEXIVE_ADDRESS:
+        attr = new StunAttributeAllocatedXorServerReflexiveAddress(msg);
         break;
 
     case STUN_ATTR_DATA:

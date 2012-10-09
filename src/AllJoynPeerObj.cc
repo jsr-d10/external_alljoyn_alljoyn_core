@@ -998,6 +998,7 @@ void AllJoynPeerObj::AlarmTriggered(const Alarm& alarm, QStatus reason)
         }
         break;
     }
+
     delete req;
     QCC_DbgHLPrintf(("AllJoynPeerObj::AlarmTriggered - exiting"));
     return;

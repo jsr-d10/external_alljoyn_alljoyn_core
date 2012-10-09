@@ -52,7 +52,6 @@ LOCAL_SRC_FILES := \
 	../common/src/ThreadPool.cc \
 	../common/src/Util.cc \
 	../common/src/XmlElement.cc \
-	../common/os/posix/AdapterUtil.cc \
 	../common/os/posix/Environ.cc \
 	../common/os/posix/Event.cc \
 	../common/os/posix/FileStream.cc \
@@ -156,6 +155,7 @@ LOCAL_C_INCLUDES := \
 	external/alljoyn/alljoyn_core/autogen \
 	external/alljoyn/alljoyn_core/daemon \
 	external/alljoyn/alljoyn_core/daemon/ice \
+	external/alljoyn/alljoyn_core/daemon/ns \
 	external/alljoyn/alljoyn_core/daemon/posix \
 	external/alljoyn/alljoyn_core/inc \
 	external/alljoyn/alljoyn_core/JSON \
@@ -177,23 +177,22 @@ LOCAL_SRC_FILES := \
 	daemon/DaemonConfig.cc \
 	daemon/DaemonRouter.cc \
 	daemon/DaemonTransport.cc \
-	daemon/NameService.cc \
 	daemon/NameTable.cc \
 	daemon/NetworkInterface.cc \
-	daemon/NsProtocol.cc \
 	daemon/Packet.cc \
 	daemon/PacketEngine.cc \
 	daemon/PacketEngineStream.cc \
 	daemon/PacketPool.cc \
 	daemon/RuleTable.cc \
 	daemon/TCPTransport.cc \
+	daemon/UDPPacketStream.cc \
 	daemon/VirtualEndpoint.cc \
 	daemon/android/P2PHelperInterface.cc \
 	daemon/bt_bluez/AdapterObject.cc \
+	daemon/bt_bluez/BTAccessor.cc \
 	daemon/bt_bluez/BlueZHCIUtils.cc \
 	daemon/bt_bluez/BlueZIfc.cc \
 	daemon/bt_bluez/BlueZUtils.cc \
-	daemon/bt_bluez/BTAccessor.cc \
 	daemon/ice/Component.cc \
 	daemon/ice/DaemonICETransport.cc \
 	daemon/ice/DiscoveryManager.cc \
@@ -201,6 +200,7 @@ LOCAL_SRC_FILES := \
 	daemon/ice/ICECandidate.cc \
 	daemon/ice/ICECandidatePair.cc \
 	daemon/ice/ICEManager.cc \
+	daemon/ice/ICEPacketStream.cc \
 	daemon/ice/ICESession.cc \
 	daemon/ice/ICEStream.cc \
 	daemon/ice/PersistGUID.cc \
@@ -230,12 +230,13 @@ LOCAL_SRC_FILES := \
 	daemon/JSON/json_reader.cc \
 	daemon/JSON/json_value.cc \
 	daemon/JSON/json_writer.cc \
-	daemon/posix/daemon-main.cc \
+	daemon/ns/IpNameService.cc \
+	daemon/ns/IpNameServiceImpl.cc \
+	daemon/ns/IpNsProtocol.cc \
 	daemon/posix/DaemonTransport.cc \
-	daemon/posix/ICEPacketStream.cc \
 	daemon/posix/ProximityScanner.cc \
 	daemon/posix/Socket.cc \
-	daemon/posix/UDPPacketStream.cc
+	daemon/posix/daemon-main.cc \
 
 LOCAL_SRC_FILES += \
 	autogen/Status.cc \
@@ -374,21 +375,24 @@ LOCAL_JNI_SHARED_LIBRARIES := libAllJoynAndroidExt
 
 include $(BUILD_PACKAGE)
 
+#
+# Exclude the P2pService for the time being.
+#
 # Rules to build P2pService.apk
-include $(CLEAR_VARS)
-LOCAL_PATH := $(LOCAL_PATH)/../alljoyn_android_p2pservice
-LOCAL_MODULE_TAGS := optional
+#include $(CLEAR_VARS)
+#LOCAL_PATH := $(LOCAL_PATH)/../alljoyn_android_p2pservice
+#LOCAL_MODULE_TAGS := optional
 
 #LOCAL_SRC_FILES := $(call all-subdir-java-files)
-LOCAL_SRC_FILES := \
-	src/org/alljoyn/bus/p2p/service/P2pHelperAndroidActivity.java \
-	src/org/alljoyn/bus/p2p/service/P2pHelperAndroidService.java \
-	src/org/alljoyn/bus/p2p/service/P2pInterface.java \
-	src/org/alljoyn/bus/p2p/service/P2pManager.java \
-	src/org/alljoyn/bus/p2p/service/P2pReceiver.java
+#LOCAL_SRC_FILES := \
+#	src/org/alljoyn/bus/p2p/service/P2pHelperAndroidActivity.java \
+#	src/org/alljoyn/bus/p2p/service/P2pHelperAndroidService.java \
+#	src/org/alljoyn/bus/p2p/service/P2pInterface.java \
+#	src/org/alljoyn/bus/p2p/service/P2pManager.java \
+#	src/org/alljoyn/bus/p2p/service/P2pReceiver.java
 
-LOCAL_PACKAGE_NAME := AllJoynP2pService
-LOCAL_CERTIFICATE := platform
-LOCAL_JNI_SHARED_LIBRARIES := libP2pHelperService
+#LOCAL_PACKAGE_NAME := AllJoynP2pService
+#LOCAL_CERTIFICATE := platform
+#LOCAL_JNI_SHARED_LIBRARIES := libP2pHelperService
 
-include $(BUILD_PACKAGE)
+#include $(BUILD_PACKAGE)

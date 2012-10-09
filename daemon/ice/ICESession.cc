@@ -23,7 +23,6 @@
 #include <algorithm>
 #include <string.h>
 #include <qcc/SocketTypes.h>
-#include <qcc/AdapterUtil.h>
 #include <qcc/Config.h>
 #include <qcc/Socket.h>
 #include <qcc/Thread.h>
@@ -86,6 +85,10 @@ ICESession::~ICESession(void)
 
     delete[] shortTermHmacKey;
     delete[] remoteShortTermHmacKey;
+
+    if (hmacKey) {
+        delete hmacKey;
+    }
 
     Unlock();
 }
@@ -371,8 +374,8 @@ uint32_t ICESession::AssignPriority(uint16_t componentID,
     // Set 'type' preference per draft-ietf-mmusic-ice-19 Section 4.1.2.2
     switch (candidateType) {
     case _ICECandidate::Host_Candidate:
-        if (AdapterUtil::GetAdapterUtil()->IsMultihomed() &&
-            AdapterUtil::GetAdapterUtil()->IsVPN(IceCandidate->GetBase().addr)) {
+        if (networkInterface.IsMultiHomed() &&
+            networkInterface.IsVPN(IceCandidate->GetBase().addr)) {
             typePreference = 0;
         } else {
             typePreference = 126;
@@ -396,11 +399,11 @@ uint32_t ICESession::AssignPriority(uint16_t componentID,
     }
 
     // Set 'local' preference per draft-ietf-mmusic-ice-19 Section 4.1.2.2
-    if (!AdapterUtil::GetAdapterUtil()->IsMultihomed()) {
+    if (!networkInterface.IsMultiHomed()) {
         localPreference = 65535;
     } else {
         if (_ICECandidate::Host_Candidate == candidateType &&
-            AdapterUtil::GetAdapterUtil()->IsVPN(IceCandidate->GetBase().addr)) {
+            networkInterface.IsVPN(IceCandidate->GetBase().addr)) {
             localPreference = 0;
         } else {
             if (IceCandidate->GetBase().addr.IsIPv6()) {
@@ -505,11 +508,11 @@ QStatus ICESession::UpdateLocalICECandidates(void)
     StunCredential stunCredential(String(reinterpret_cast<char*>(pwdBuf), sizeof(pwdBuf)));
 
     // Size buffer first
-    stunCredential.GetKey(NULL, hmacKeyLen);
-    uint8_t* key = new uint8_t[hmacKeyLen];
+    //stunCredential.GetKey(NULL, hmacKeyLen);
+    //uint8_t* key = new uint8_t[hmacKeyLen];
 
     // Now get the real key ...
-    stunCredential.GetKey(key, hmacKeyLen);
+    //stunCredential.GetKey(key, hmacKeyLen);
 
     ufrag = BytesToHexString(ufragBuf, sizeof(ufragBuf));
     pwd = BytesToHexString(pwdBuf, sizeof(pwdBuf));
@@ -1020,21 +1023,30 @@ QStatus ICESession::GatherHostCandidates(bool enableIpv6)
 
     // now see if we want to look for all local network interfaces
     if (addHostCandidates) {
-        // add candidates per network interface list
-        AdapterUtil::const_iterator networkInterfaceIter;
-        AdapterUtil::GetAdapterUtil()->ForceUpdate();
-        AdapterUtil::GetAdapterUtil()->GetLock();
+        // Update the interface list
+        status = networkInterface.UpdateNetworkInterfaces();
+        if (status != ER_OK) {
+            QCC_LogError(status, ("%s: networkInterface.UpdateNetworkInterfaces() failed", __FUNCTION__));
+            return status;
+        }
 
-        for (networkInterfaceIter = AdapterUtil::GetAdapterUtil()->Begin(); networkInterfaceIter != AdapterUtil::GetAdapterUtil()->End(); ++networkInterfaceIter) {
-            QCC_DbgPrintf(("network adapter = %s networkInterfaceIter->addr.IsIPv6() = %d", networkInterfaceIter->addr.ToString().c_str(), networkInterfaceIter->addr.IsIPv6()));
+        // Ensure that live interfaces are available before proceeding further
+        if (!networkInterface.IsAnyNetworkInterfaceUp()) {
+            status = ER_FAIL;
+            QCC_LogError(status, ("%s: None of the interfaces are up", __FUNCTION__));
+            return status;
+        }
 
+        std::vector<qcc::IfConfigEntry>::iterator networkInterfaceIter;
+
+        for (networkInterfaceIter = networkInterface.liveInterfaces.begin(); networkInterfaceIter != networkInterface.liveInterfaces.end(); ++networkInterfaceIter) {
             // Ignore IPv6 interfaces if IPv6 support is disabled
-            if ((!enableIpv6) && (networkInterfaceIter->addr.IsIPv6())) {
+            if ((!enableIpv6) && (networkInterfaceIter->m_family == QCC_AF_INET6)) {
                 continue;
             }
 
             // (This typically ignores the specified port and OS binds to ephemeral port.)
-            status = component->CreateHostCandidate(socketType, networkInterfaceIter->addr, port);
+            status = component->CreateHostCandidate(socketType, qcc::IPAddress(networkInterfaceIter->m_addr), port, networkInterfaceIter->m_mtu);
 
             if (status != ER_OK) {
                 QCC_LogError(status, ("component->CreateHostCandidate"));
@@ -1044,7 +1056,7 @@ QStatus ICESession::GatherHostCandidates(bool enableIpv6)
 
             if (NULL != implicitComponent) {
                 // (This typically ignores the specified port and OS binds to ephemeral port.)
-                status = implicitComponent->CreateHostCandidate(socketType, networkInterfaceIter->addr, port + 1);
+                status = implicitComponent->CreateHostCandidate(socketType, qcc::IPAddress(networkInterfaceIter->m_addr), port + 1, networkInterfaceIter->m_mtu);
 
                 if (status != ER_OK) {
                     QCC_LogError(status, ("implicitComponent->CreateHostCandidate"));
@@ -1052,25 +1064,17 @@ QStatus ICESession::GatherHostCandidates(bool enableIpv6)
                 }
             }
         }
-
-        AdapterUtil::GetAdapterUtil()->ReleaseLock();
     }
 
     return status;
 }
 
-QStatus ICESession::Init(bool enableIpv6)
+QStatus ICESession::Init(void)
 {
     QStatus status = ER_OK;
 
-    if (addHostCandidates) {
-        // Find out how many physical and virtual (e.g. VPN) IP addresses are
-        // directly attached to this host.
-        AdapterUtil::GetAdapterUtil();
-    }
-
     // Gather candidates for host
-    status = GatherHostCandidates(enableIpv6);
+    status = GatherHostCandidates(EnableIPv6);
     if (ER_OK != status) {
         QCC_LogError(status, ("GatherHostCandidates()"));
         goto exit;

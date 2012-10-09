@@ -785,19 +785,17 @@ QStatus ProxyBusObject::MethodCall(const InterfaceDescription::Member& method,
             if (!isExiting) {
                 components->waitingThreads.push_back(thisThread);
                 lock->Unlock(MUTEX_CONTEXT);
-                status = Event::Wait(ctxt->event);
+                status = Event::Wait(ctxt->event, timeout);
                 lock->Lock(MUTEX_CONTEXT);
-                vector<Thread*>::iterator it = components->waitingThreads.begin();
-                while (it != components->waitingThreads.end()) {
-                    if (*it == thisThread) {
-                        components->waitingThreads.erase(it);
-                        break;
-                    }
-                    ++it;
+
+                std::vector<Thread*>::iterator it = std::find(components->waitingThreads.begin(), components->waitingThreads.end(), thisThread);
+                if (it != components->waitingThreads.end()) {
+                    components->waitingThreads.erase(it);
                 }
             }
             lock->Unlock(MUTEX_CONTEXT);
         }
+
         if ((status == ER_OK) && (SYNC_METHOD_ALERTCODE_OK == thisThread->GetAlertCode())) {
             replyMsg = ctxt->replyMsg;
         } else if (SYNC_METHOD_ALERTCODE_ABORT == thisThread->GetAlertCode()) {

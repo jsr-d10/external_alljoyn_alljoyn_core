@@ -115,27 +115,6 @@ public ref class InterfaceDescription sealed {
                    uint8_t annotation,
                    Platform::String ^ accessPerms);
 
-    /// <summary>Add a member to the interface.</summary>
-    /// <param name="type"> Message type.</param>
-    /// <param name="name"> Name of member.</param>
-    /// <param name="inputSig"> Signature of input parameters or NULL for none.</param>
-    /// <param name="outSig"> Signature of output parameters or NULL for none.</param>
-    /// <param name="argNames"> Comma separated list of input and then output arg names used in annotation XML.</param>
-    /// <param name="annotation"> Map of annotations (string=>string)</param>
-    /// <param name="accessPerms"> Required permissions to invoke this call</param>
-    /// <exception cref="Platform::COMException">
-    /// HRESULT will contain the AllJoyn error status code for the error.
-    /// - #ER_OK if successful
-    /// - #ER_BUS_MEMBER_ALREADY_EXISTS if member already exists
-    /// </exception>
-    void AddMemberWithMap(AllJoynMessageType type,
-                          Platform::String ^ name,
-                          Platform::String ^ inputSig,
-                          Platform::String ^ outSig,
-                          Platform::String ^ argNames,
-                          Windows::Foundation::Collections::IMapView<Platform::String ^, Platform::String ^> ^ annotations,
-                          Platform::String ^ accessPerms);
-
     /// <summary>Add an annotation to an existing member (signal or method).</summary>
     /// <param name="member"> Name of member</param>
     /// <param name="name"> Name of annotation</param>
@@ -156,10 +135,6 @@ public ref class InterfaceDescription sealed {
     Platform::String ^ GetMemberAnnotation(Platform::String ^ member, Platform::String ^ name);
 
     /// <summary>Lookup a member description by name</summary>
-    /// <param name="name">
-    /// <summary>
-    /// Lookup a member description by name
-    /// </summary>
     /// <param name="name">
     ///Name of the member to lookup
     /// </param>
@@ -236,37 +211,6 @@ public ref class InterfaceDescription sealed {
                    Platform::String ^ argNames,
                    uint8_t annotation,
                    Platform::String ^ accessPerms);
-
-    /// <summary>Add a method call member to the interface.</summary>
-    /// <param name="name">
-    ///Name of method call member.
-    /// </param>
-    /// <param name="inputSig">
-    ///Signature of input parameters or NULL for none.
-    /// </param>
-    /// <param name="outSig">
-    ///Signature of output parameters or NULL for none.
-    /// </param>
-    /// <param name="argNames">
-    ///Comma separated list of input and then output arg names used in annotation XML.
-    /// </param>
-    /// <param name="annotation">
-    ///Map of annotations.
-    /// </param>
-    /// <param name="accessPerms">
-    ///Access permission requirements on this call
-    /// </param>
-    /// <exception cref="Platform::COMException">
-    /// HRESULT will contain the AllJoyn error status code for the error.
-    /// - #ER_OK if successful
-    /// - #ER_BUS_MEMBER_ALREADY_EXISTS if member already exists
-    /// </exception>
-    void AddMethodWithMap(Platform::String ^ name,
-                          Platform::String ^ inputSig,
-                          Platform::String ^ outSig,
-                          Platform::String ^ argNames,
-                          Windows::Foundation::Collections::IMapView<Platform::String ^, Platform::String ^> ^ annotations,
-                          Platform::String ^ accessPerms);
 
     /// <summary>
     ///Lookup a member method description by name
@@ -379,10 +323,6 @@ public ref class InterfaceDescription sealed {
 
     /// <summary>Check for existence of a property.</summary>
     /// <param name="name">
-    /// <summary>
-    ///Check for existence of a property.
-    /// </summary>
-    /// <param name="name">
     ///Name of the property to lookup
     /// </param>
     /// <returns>
@@ -432,6 +372,23 @@ public ref class InterfaceDescription sealed {
     /// - #ER_BUS_MEMBER_ALREADY_EXISTS if member already exists
     /// </exception>
     void AddAnnotation(Platform::String ^ name, Platform::String ^ value);
+
+    /// <summary>
+    ///Get the names and values of annotations.
+    /// </summary>
+    /// <param name="names"> Names of the retrieved annotations</param>
+    /// <param name="values"> Values of the retrieved annotations</param>
+    /// <param name="size"> Number of annotations to get</param>
+    /// <remarks>
+    ///To get the total number of annotations:
+    /// - Call with names and values set to null, and size == 0
+    /// - Allocate arrays for names and values sized with the initial return value
+    /// - Call again with the properly sized arrays and size parameter
+    /// </remarks>
+    /// <returns>
+    ///The number of annotations returned.
+    /// </returns>
+    uint32_t GetAnnotations(Platform::WriteOnlyArray<Platform::String ^> ^ names, Platform::WriteOnlyArray<Platform::String ^> ^ values, uint32_t size);
 
     /// <summary>Get the value of an annotation</summary>
     /// <param name="name"> Name of annotation</param>

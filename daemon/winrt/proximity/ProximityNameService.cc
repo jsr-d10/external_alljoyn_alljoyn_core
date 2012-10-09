@@ -666,7 +666,7 @@ void ProximityNameService::NotifyDisconnected()
     }
 }
 
-extern bool WildcardMatch(qcc::String str, qcc::String pat);
+extern bool IpNameServiceImplWildcardMatch(qcc::String str, qcc::String pat);
 
 void ProximityNameService::Locate(const qcc::String& namePrefix)
 {
@@ -682,7 +682,7 @@ void ProximityNameService::Locate(const qcc::String& namePrefix)
     whoHas.AddName(namePrefix);
 
     Header header;
-    header.SetVersion(0);
+    header.SetVersion(0, 0);
     header.SetTimer(m_tDuration);
     header.AddQuestion(whoHas);
 
@@ -749,7 +749,7 @@ void ProximityNameService::TransmitMyWKNs(void)
     // the advertisements for that number of seconds.
     //
     Header header;
-    header.SetVersion(0);
+    header.SetVersion(0, 0);
     header.SetTimer(m_tDuration);
     header.AddAnswer(isAt);
 
@@ -827,7 +827,7 @@ void ProximityNameService::HandleProtocolQuestion(WhoHas whoHas, qcc::IPAddress 
             // The requested name comes in from the WhoHas message and we
             // allow wildcards there.
             //
-            if (WildcardMatch((*j), wkn)) {
+            if (IpNameServiceImplWildcardMatch((*j), wkn)) {
                 QCC_DbgHLPrintf(("ProximityNameService::HandleProtocolQuestion(): request for %s does not match my %s",
                                  wkn.c_str(), (*j).c_str()));
                 continue;
@@ -986,7 +986,9 @@ void ProximityNameService::HandleProtocolMessage(uint8_t const* buffer, uint32_t
     //
     // We only understand version zero packets for now.
     //
-    if (header.GetVersion() != 0) {
+    uint32_t nsVersion, msgVersion;
+    header.GetVersion(nsVersion, msgVersion);
+    if (msgVersion != 0) {
         QCC_DbgPrintf(("ProximityNameService::HandleProtocolMessage(): Unknown version: Error"));
         return;
     }

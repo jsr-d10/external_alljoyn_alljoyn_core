@@ -257,5 +257,6 @@ void _ServiceDB::AlarmTriggered(const Alarm& alarm, QStatus reason)
         }
         it->second.lock.Unlock(MUTEX_CONTEXT);
     }
+
     delete serviceName;
 }

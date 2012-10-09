@@ -23,13 +23,13 @@
 #include "alljoyn/version.h"
 
 static const char product[] = "Alljoyn Library";
-static const unsigned int architecture = 2;
-static const unsigned int apiLevel = 7;
-static const unsigned int release = 0;
+static const unsigned int architecture = 3;
+static const unsigned int apiLevel = 0;
+static const unsigned int release = 1;
 
 
-static const char version[] = "v2.7.0";
-static const char build[] = "Alljoyn Library v2.7.0 (Built Wed Aug 22 22:01:13 UTC 2012 on sea-ajnu1010-c by seabuild - Git branch: '(no branch)' tag: 'R03.01.00c1' (+0 changes) commit ref: c7fd45106a623ae02b267a28b9b32fb38265ccaf)";
+static const char version[] = "v3.0.1";
+static const char build[] = "Alljoyn Library v3.0.1 (Built Sun Oct 07 18:03:56 UTC 2012 on sea-ajnu1010-b by seabuild)";
 
 const char * ajn::GetVersion()
 {

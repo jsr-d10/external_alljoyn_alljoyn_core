@@ -24,9 +24,7 @@
 #include <assert.h>
 #include <algorithm>
 #include <map>
-#include <qcc/AdapterUtil.h>
 #include <qcc/Crypto.h>
-#include <qcc/NetInfo.h>
 #include <qcc/Socket.h>
 #include "ScatterGatherList.h"
 #include <Stun.h>
@@ -67,6 +65,7 @@ Stun::Stun(SocketType type,
            STUNServerInfo stunInfo,
            const uint8_t* key,
            size_t keyLen,
+           size_t mtu,
            bool autoFraming) :
     rxThread(NULL),
     turnAddr(), turnPort(),
@@ -74,13 +73,13 @@ Stun::Stun(SocketType type,
     autoFraming(autoFraming),
     rxFrameRemain(0), txFrameRemain(0),
     rxLeftoverBuf(NULL), rxLeftoverLen(0),
-    maxMTU(0),
+    maxMTU(mtu),
     component(component),
     STUNInfo(stunInfo),
     hmacKey(key),
     hmacKeyLen(keyLen)
 {
-    QCC_DbgTrace(("Stun::Stun(%p)", this));
+    QCC_DbgTrace(("Stun::Stun(%p) maxMTU(%d)", this, maxMTU));
 
     if (stunInfo.relayInfoPresent) {
         turnAddr = stunInfo.relay.address;
@@ -93,25 +92,6 @@ Stun::~Stun(void)
     QCC_DbgTrace(("Stun::~Stun(%p)", this));
     ReleaseFD(true);
 }
-
-
-void Stun::SetMaxMTU(IPAddress ipAddress)
-{
-    AdapterUtil* au = AdapterUtil::GetAdapterUtil();
-    AdapterUtil::const_iterator iter;
-
-    au->GetLock();
-    for (iter = au->Begin(); iter != au->End(); ++iter) {
-        if (iter->addr == ipAddress) {
-            maxMTU = iter->mtu;
-            break;
-        }
-    }
-    au->ReleaseLock();
-
-    QCC_DbgPrintf(("Max MTU = %u", maxMTU));
-}
-
 
 QStatus Stun::OpenSocket(AddressFamily af)
 {
@@ -169,9 +149,6 @@ QStatus Stun::Bind(const IPAddress& localAddr, uint16_t localPort)
 
     if (opened) {
         status = qcc::Bind(sockfd, localAddr, localPort);
-
-        /* Set the MTU as per the interface type corresponding to the localAddr */
-        SetMaxMTU(localAddr);
 
         /* Ensure that the MTU is set appropriately */
         if (maxMTU == 0) {
@@ -403,6 +380,12 @@ QStatus Stun::SendStunMessage(const StunMessage& msg, IPAddress addr, uint16_t p
                 status = rMsg.AddAttribute(new StunAttributeXorPeerAddress(rMsg, addr, port));
             }
             if (status == ER_OK) {
+                status = rMsg.AddAttribute(new StunAttributeAllocatedXorServerReflexiveAddress(rMsg, localSrflxCandidate.addr, localSrflxCandidate.port));
+            }
+            if (status == ER_OK) {
+                status = rMsg.AddAttribute(new StunAttributeIceCheckFlag());
+            }
+            if (status == ER_OK) {
                 status = rMsg.AddAttribute(new StunAttributeData(msgSG));
             }
             if (status == ER_OK) {
@@ -615,100 +598,6 @@ ThreadReturn STDCALL Stun::RxThread(void*arg)
     return 0;
 }
 
-
-
-
-QStatus Stun::RecvFramedBuffer(uint8_t*& frameBuf, size_t& frameBufSize, size_t& frameLen)
-{
-    QStatus status = ER_OK;
-    size_t rxTotal;
-    size_t received;
-
-    QCC_DbgTrace(("Stun::RecvFramedBuffer( frameBuf, frameBufSize, frameLen)"));
-
-    QCC_DbgPrintf(("RX: rxLeftoverLen = %u   rxLeftoverPos(rel) = %u",
-                   rxLeftoverLen, ((rxLeftoverBuf != NULL) ? rxLeftoverPos - rxLeftoverBuf : 0)));
-
-    if (!opened) {
-        status = ER_STUN_SOCKET_NOT_OPEN;
-        goto exit;
-    }
-
-    if (rxLeftoverBuf != NULL) {
-        // Create a buffer guaranteed large enough for the frame.  Excess will
-        // be cached for later use.
-        frameBufSize = max((static_cast<size_t>(rxLeftoverPos[0] + 1) << 8) + FRAMING_SIZE, rxLeftoverLen);
-        frameBuf = new uint8_t[frameBufSize];
-
-        // Need to copy the left over into our frame buffer.
-        memcpy(frameBuf, rxLeftoverPos, rxLeftoverLen);
-        rxTotal = rxLeftoverLen;
-
-        delete[] rxLeftoverBuf;     // Don't need the leftover any more.
-        rxLeftoverBuf = NULL;
-        rxLeftoverLen = 0;
-    } else {
-        // Don't know how large a buffer we need so start with the max MTU.
-        frameBufSize = maxMTU;
-        frameBuf = new uint8_t[frameBufSize];
-        rxTotal = 0;
-    }
-
-    while (rxTotal < FRAMING_SIZE) {
-        status = Recv(sockfd,
-                      frameBuf + rxTotal,
-                      frameBufSize - rxTotal,
-                      received);
-        if (status != ER_OK) {
-            goto exit;
-        }
-
-        rxTotal += received;
-    }
-
-    frameLen = ((static_cast<uint16_t>(frameBuf[0]) << 8) |
-                static_cast<uint16_t>(frameBuf[1]));
-
-    QCC_DbgPrintf(("RX: frameLen = %u (%x)", frameLen, frameLen));
-
-
-    if ((frameLen + FRAMING_SIZE) > frameBufSize) {
-        // The frame buffer is too small, so copy it to a larger buffer.
-        uint8_t* newBuf;
-        size_t newBufSize = frameLen + FRAMING_SIZE;
-
-        newBuf = new uint8_t[newBufSize];
-
-        memcpy(newBuf, frameBuf, rxTotal);
-        delete[] frameBuf;
-        frameBuf = newBuf;
-        frameBufSize = newBufSize;
-        newBuf = reinterpret_cast<uint8_t*>(0xdeadbeef);
-    }
-
-    while (rxTotal < (frameLen + FRAMING_SIZE)) {
-        status = Recv(sockfd,
-                      frameBuf + rxTotal,
-                      frameBufSize - rxTotal,
-                      received);
-        if (status != ER_OK) {
-            goto exit;
-        }
-
-        rxTotal += received;
-    }
-
-    if (rxTotal > (frameLen + FRAMING_SIZE)) {
-        // There's some leftover data to hold onto.
-        rxLeftoverBuf = frameBuf;
-        rxLeftoverPos = frameBuf + (frameLen + FRAMING_SIZE);
-        rxLeftoverLen = rxTotal - (frameLen + FRAMING_SIZE);
-    }
-
-exit:
-    return status;
-}
-
 QStatus Stun::RecvStunMessage(StunMessage& msg, IPAddress& addr, uint16_t& port, bool& relayed, uint32_t maxMs)
 {
     Thread* selfThread = Thread::GetThread();
@@ -732,17 +621,6 @@ QStatus Stun::RecvStunMessage(StunMessage& msg, IPAddress& addr, uint16_t& port,
         status = ER_NOT_IMPLEMENTED;
         QCC_LogError(status, ("Receiving STUN message"));
         goto exit;
-#if 0
-        if (!usingTurn) {
-            // STUN messages are framed.
-            status = RecvFramedBuffer(buf, bufSize, parseSize);
-            pos = buf + FRAMING_SIZE;
-        } else {
-            status = ER_STUN_RELAYED_TCP_NOT_SUPPORTED;
-            QCC_LogError(status, ("Receiving STUN message"));
-            goto exit;
-        }
-#endif
     } else {
         // UDP
         vector<Event*> waitEvents, signaledEvents;
@@ -854,6 +732,12 @@ QStatus Stun::AppSendSG(const ScatterGatherList& sg, size_t& sent)
         size_t renderSize;
 
         status = msg.AddAttribute(new StunAttributeXorPeerAddress(msg, remoteAddr, remotePort));
+        if (status == ER_OK) {
+            status = msg.AddAttribute(new StunAttributeAllocatedXorServerReflexiveAddress(msg, localSrflxCandidate.addr, localSrflxCandidate.port));
+        }
+        if (status == ER_OK) {
+            status = msg.AddAttribute(new StunAttributeIceCheckFlag());
+        }
         if (status == ER_OK) {
             status = msg.AddAttribute(new StunAttributeData(sg));
         }

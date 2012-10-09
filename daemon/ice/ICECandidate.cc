@@ -155,13 +155,17 @@ _ICECandidate::~_ICECandidate(void)
     if (sharedStunServerReflexiveCandidate) {
         delete sharedStunServerReflexiveCandidate;
     }
+    if (candidateThread) {
+        delete candidateThread;
+        candidateThread = NULL;
+    }
 }
 
 QStatus _ICECandidate::StartListener()
 {
     QCC_DbgTrace(("%s", __FUNCTION__));
     assert(!candidateThread);
-    candidateThread = new ICECandidateThread(new ICECandidate(this));
+    candidateThread = new ICECandidateThread(this);
 
     // Start the thread which will listen for responses, ICE checks
     return candidateThread->Start();
@@ -352,6 +356,11 @@ QStatus _ICECandidate::ReadReceivedMessage(uint32_t timeoutMsec)
 
             sa.GetAddress(reflexive.addr, reflexive.port);
 
+            // Set the local Server reflexive candidate in the associated STUN object. We don't
+            // care if the returned Server reflexive candidate is same as the local host
+            // candidate for this setting
+            stunActivity->stun->SetLocalSrflxCandidate(reflexive);
+
             if (ICESession::ICEGatheringCandidates ==
                 component->GetICEStream()->GetSession()->GetState()) {
                 if (relayedCandidate->GetType() == _ICECandidate::Relayed_Candidate) {
@@ -393,7 +402,11 @@ QStatus _ICECandidate::ReadReceivedMessage(uint32_t timeoutMsec)
 
         case STUN_ATTR_XOR_PEER_ADDRESS:
         {
+            break;
+        }
 
+        case STUN_ATTR_ALLOCATED_XOR_SERVER_REFLEXIVE_ADDRESS:
+        {
             break;
         }
 
@@ -615,6 +628,7 @@ QStatus _ICECandidate::ReadReceivedMessage(uint32_t timeoutMsec)
         if (ER_OK == status &&
             checkStatus == ICECandidatePair::CheckResponseSent) {
 
+#if 0
             // Section 7.2.1.3 draft-ietf-mmusic-ice-19
             String uniqueFoundation;
             ICECandidate remoteCandidate = component->GetICEStream()->MatchRemoteCandidate(remote, uniqueFoundation);
@@ -630,6 +644,7 @@ QStatus _ICECandidate::ReadReceivedMessage(uint32_t timeoutMsec)
                 // Add remote peer-reflexive candidate to our list.
                 component->GetICEStream()->AddRemoteCandidate(remoteCandidate);
             }
+#endif
 
             // Section 7.2.1.4 draft-ietf-mmusic-ice-19
             // 'Construct' a pair, meaning find a pair whose local candidate is equal to
@@ -640,10 +655,13 @@ QStatus _ICECandidate::ReadReceivedMessage(uint32_t timeoutMsec)
             // candidates (host, server-reflexive, relayed,) each belonging to perhaps multiple candidate pairs.
             ICECandidatePair* constructedPair = NULL;
             if (receivedMsgWasRelayed && sharedStunRelayedCandidate) {
+                QCC_DbgPrintf(("%s: receivedMsgWasRelayed && sharedStunRelayedCandidate", __FUNCTION__));
                 constructedPair = component->GetICEStream()->MatchCheckListEndpoint((*sharedStunRelayedCandidate)->endPoint, remote);
             } else {
+                QCC_DbgPrintf(("%s: !(receivedMsgWasRelayed && sharedStunRelayedCandidate)", __FUNCTION__));
                 constructedPair = component->GetICEStream()->MatchCheckListEndpoint(endPoint, remote);
                 if ((NULL == constructedPair) && sharedStunServerReflexiveCandidate) {
+                    QCC_DbgPrintf(("%s: ((NULL == constructedPair) && sharedStunServerReflexiveCandidate)", __FUNCTION__));
                     constructedPair = component->GetICEStream()->MatchCheckListEndpoint((*sharedStunServerReflexiveCandidate)->endPoint, remote);
                 }
             }
@@ -807,7 +825,12 @@ QStatus _ICECandidate::SendResponse(uint16_t checkStatus, IPEndpoint& dest,
                    tid.ToString().c_str(),
                    dest.addr.ToString().c_str(), dest.port));
 
-    msg->AddAttribute(new StunAttributeXorMappedAddress(*msg, dest.addr, dest.port));
+    /*
+     * We don't need to include the XOR_MAPPED_ADDRESS attribute in binding responses as this
+     * attribute is not used in any way by either the Server or the daemon. This attribute
+     * may be required if the support for peer reflexive candidates are enabled.
+     */
+    //msg->AddAttribute(new StunAttributeXorMappedAddress(*msg, dest.addr, dest.port));
     msg->AddAttribute(new StunAttributeRequestedTransport(REQUESTED_TRANSPORT_TYPE_UDP));
     msg->AddAttribute(new StunAttributeMessageIntegrity(*msg));
     msg->AddAttribute(new StunAttributeFingerprint(*msg));

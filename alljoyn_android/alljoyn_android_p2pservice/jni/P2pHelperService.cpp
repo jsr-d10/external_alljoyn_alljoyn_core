@@ -55,6 +55,7 @@ class P2pService;
 static const char* P2P_SERVICE_INTERFACE_NAME = "org.alljoyn.bus.p2p.P2pInterface";
 static const char* SERVICE_OBJECT_PATH = "/P2pService";
 static const char* SERVICE_NAME = "org.alljoyn.bus.p2p";
+static const char* DAEMON_ADDR = "unix:abstract=alljoyn";
 
 static BusAttachment* s_bus = NULL;
 static P2pService* s_obj = NULL;
@@ -225,7 +226,7 @@ class P2pService : public BusObject {
     }
 
     void detachEnv(jint jret) {
-        LOGI("deleteEnv()");
+        LOGI("detachEnv()");
         if (jret == JNI_EDETACHED) {
             LOGI("detaching");
             vm->DetachCurrentThread();
@@ -550,7 +551,7 @@ class P2pService : public BusObject {
         int result = CancelFindAdvertisedName(namePrefix.c_str());
 
         LOGI("handleCancelFindAdvertisedName replying with %d", result);
-        MsgArg reply("i", 1, result);
+        MsgArg reply("i", result);
         QStatus status = MethodReply(msg, &reply, 1);
         if (ER_OK != status) {
             LOGE("handleCancelAdvertisedName: Error sending reply (%s)", QCC_StatusText(status));
@@ -566,8 +567,8 @@ class P2pService : public BusObject {
 
         int result = AdvertiseName(name.c_str(), guid.c_str());
 
-        LOGI("handleAdvertisedName replying with %d", result);
-        MsgArg reply("i", 1, result);
+        LOGI("handleAdvertiseName replying with %d", result);
+        MsgArg reply("i", result);
         QStatus status = MethodReply(msg, &reply, 1);
         if (ER_OK != status) {
             LOGE("handleAdvertiseName: Error sending reply (%s)", QCC_StatusText(status));
@@ -584,7 +585,7 @@ class P2pService : public BusObject {
         int result = CancelAdvertiseName(name.c_str(), guid.c_str());
 
         LOGI("handleCancelAdvertisedName replying with %d", result);
-        MsgArg reply("i", 1, result);
+        MsgArg reply("i", result);
         QStatus status = MethodReply(msg, &reply, 1);
         if (ER_OK != status) {
             LOGE("handleCancelAdvertiseName: Error sending reply (%s)", QCC_StatusText(status));
@@ -601,7 +602,7 @@ class P2pService : public BusObject {
         int result = EstablishLink(device.c_str(), intent);
 
         LOGI("handleEstablishLink replying with %d", result);
-        MsgArg reply("i", 1, result);
+        MsgArg reply("i", result);
         QStatus status = MethodReply(msg, &reply, 1);
         if (ER_OK != status) {
             LOGE("handleEstablishLink: Error sending reply (%s)", QCC_StatusText(status));
@@ -610,14 +611,14 @@ class P2pService : public BusObject {
 
     void handleReleaseLink(const InterfaceDescription::Member* member, Message& msg)
     {
-        int handle = msg->GetArg(1)->v_int32;
+        int handle = msg->GetArg(0)->v_int32;
 
         LOGD("handleReleaseLink called from %s with: %d\n", msg->GetSender(), handle);
 
         int result = ReleaseLink(handle);
 
         LOGI("handleReleaseLink replying with %d", result);
-        MsgArg reply("i", 1, result);
+        MsgArg reply("i", result);
         QStatus status = MethodReply(msg, &reply, 1);
         if (ER_OK != status) {
             LOGE("handleReleaseLink: Error sending reply (%s)", QCC_StatusText(status));
@@ -626,7 +627,7 @@ class P2pService : public BusObject {
 
     void handleGetInterfaceNameFromHandle(const InterfaceDescription::Member* member, Message& msg)
     {
-        int handle = msg->GetArg(1)->v_int32;
+        int handle = msg->GetArg(0)->v_int32;
         char buf[64];
 
         LOGD("handleGetInterfaceNameFromHandle called from %s with: %d\n", msg->GetSender(), handle);
@@ -634,7 +635,7 @@ class P2pService : public BusObject {
         int result = GetInterfaceNameFromHandle(handle, buf, 64);
 
         LOGI("handleGetInterfaceName replying with %d", result);
-        MsgArg reply("s", 1, buf);
+        MsgArg reply("s", buf);
         QStatus status = MethodReply(msg, &reply, 1);
         if (ER_OK != status) {
             LOGE("handleGetInterfaceNameFromHandle: Error sending reply (%s)", QCC_StatusText(status));
@@ -747,7 +748,6 @@ extern "C" {
 JNIEXPORT jboolean JNICALL Java_org_alljoyn_bus_p2p_service_P2pHelperAndroidService_00024P2pHelperService_jniOnCreate(JNIEnv*env, jobject jobj) {
 
     QStatus status = ER_OK;
-    const char* daemonAddr = "unix:abstract=alljoyn";
     InterfaceDescription* p2pIntf = NULL;
     JavaVM* vm;
     jobject jglobalObj = NULL;
@@ -762,6 +762,7 @@ JNIEXPORT jboolean JNICALL Java_org_alljoyn_bus_p2p_service_P2pHelperAndroidServ
     s_bus = new BusAttachment("P2pHelperService", true);
     if (!s_bus) {
         LOGE("new BusAttachment failed");
+        return false;
     } else {
         /* Create org.alljoyn.bus.p2p.service interface */
         status = s_bus->CreateInterface(P2P_SERVICE_INTERFACE_NAME, p2pIntf);
@@ -790,23 +791,35 @@ JNIEXPORT jboolean JNICALL Java_org_alljoyn_bus_p2p_service_P2pHelperAndroidServ
             status = s_bus->RegisterBusObject(*s_obj);
             if (ER_OK != status) {
                 LOGE("BusAttachment::RegisterBusObject failed (%s)", QCC_StatusText(status));
+                delete s_obj;
+                delete s_bus;
+                s_obj = NULL;
+                s_bus = NULL;
+                return false;
             } else {
                 /* Start the msg bus */
                 status = s_bus->Start();
                 if (ER_OK != status) {
                     LOGE("BusAttachment::Start failed (%s)", QCC_StatusText(status));
+                    delete s_obj;
+                    delete s_bus;
+                    s_obj = NULL;
+                    s_bus = NULL;
+                    return false;
                 } else {
                     /* Connect to the daemon */
-                    status = s_bus->Connect(daemonAddr);
+                    status = s_bus->Connect(DAEMON_ADDR);
                     if (ER_OK != status) {
-                        LOGE("BusAttachment::Connect(\"%s\") failed (%s)", daemonAddr, QCC_StatusText(status));
-                        s_bus->Disconnect(daemonAddr);
+                        LOGE("BusAttachment::Connect(\"%s\") failed (%s)", DAEMON_ADDR, QCC_StatusText(status));
+                        s_bus->Disconnect(DAEMON_ADDR);
                         s_bus->UnregisterBusObject(*s_obj);
                         delete s_obj;
+                        delete s_bus;
                         s_obj = NULL;
+                        s_bus = NULL;
                         return false;
                     } else {
-                        LOGE("BusAttachment::Connect(\"%s\") SUCCEEDED (%s)", daemonAddr, QCC_StatusText(status));
+                        LOGE("BusAttachment::Connect(\"%s\") SUCCEEDED (%s)", DAEMON_ADDR, QCC_StatusText(status));
                     }
                 }
             }
@@ -832,8 +845,20 @@ JNIEXPORT jboolean JNICALL Java_org_alljoyn_bus_p2p_service_P2pHelperAndroidServ
  */
 JNIEXPORT void JNICALL Java_org_alljoyn_bus_p2p_service_P2pHelperAndroidService_00024P2pHelperService_jniOnDestroy(JNIEnv* env, jobject jobj) {
     LOGI("jniOnDestroy");
+
+    if (s_bus) {
+        s_bus->ReleaseName(SERVICE_NAME);
+        s_bus->Disconnect(DAEMON_ADDR);
+        if (s_obj) {
+            s_bus->UnregisterBusObject(*s_obj);
+        }
+    }
+
+
     delete s_obj;
+    delete s_bus;
     s_obj = NULL;
+    s_bus = NULL;
 }
 
 JNIEXPORT void JNICALL Java_org_alljoyn_bus_p2p_service_P2pHelperAndroidService_00024P2pHelperService_jniOnFoundAdvertisedName(JNIEnv* env, jobject jobj, jstring name, jstring namePrefix, jstring guid, jstring device) {

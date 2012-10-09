@@ -24,14 +24,33 @@
 #include <stdio.h>
 #include <qcc/Thread.h>
 
+
 #include "DiscoveryManager.h"
 #include "ProximityScanEngine.h"
-#include <ProximityScanner.h>
+#include "ProximityScanner.h"
 
 using namespace std;
 using namespace qcc;
 
 #define QCC_MODULE "PROXIMITY_SCAN_ENGINE"
+#define LOG_TAG  "ProximityScanEngine"
+
+#if defined (QCC_OS_ANDROID)
+#include <android/log.h>
+        #ifndef LOGD
+        #define LOGD(...) (__android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__))
+        #endif
+
+        #ifndef LOGI
+        #define LOGI(...) (__android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__))
+        #endif
+
+        #ifndef LOGE
+        #define LOGE(...) (__android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__))
+        #endif
+#endif
+
+
 
 class DiscoveryManager;
 
@@ -105,7 +124,7 @@ void ProximityScanEngine::PrintHysteresis() {
     QCC_DbgPrintf(("----------------------------------------------"));
 }
 
-ProximityScanEngine::ProximityScanEngine(DiscoveryManager*dm) : mainTimer("ProximityScanTimer"), tScan(NULL), bus(dm->bus) {
+ProximityScanEngine::ProximityScanEngine(DiscoveryManager*dm) : mainTimer("ProximityScanTimer"), bus(dm->bus) {
 
     QCC_DbgTrace(("ProximityScanEngine::ProximityScanEngine() called"));
     tadd_count = 1;
@@ -255,7 +274,7 @@ void ProximityScanEngine::ProcessScanResults() {
 
     //
     // This needs to checked for the following conditions:
-    // 1. We did not get any opportunistic scan results since the last 4 scans = 120 secs.
+    // 1. We did not get any opportunistic scan results since the last 4 scans = 60 secs.
     //    This could mean that we are either connected to a network in which case we are not returned any results
     //	  This could also mean that Wifi is turned off or the phone is acting as a portable hotspot
     // 2. Wifi is turned ON but we do not have any networks in the vicinity. In that case it is not harmful to
@@ -403,16 +422,23 @@ void ProximityScanEngine::ProcessScanResults() {
 
 void ProximityScanEngine::AlarmTriggered(const Alarm& alarm, QStatus reason)
 {
-    while (true) {
-        uint64_t start = GetTimestamp64();
-        proximityScanner->Scan(request_scan);
-        ProcessScanResults();
-        uint32_t delay = ::max((uint64_t)0, SCAN_DELAY - (GetTimestamp64() - start));
-        if (delay > 0) {
-            //Add alarm with delay time to our main timer
-            QCC_DbgPrintf(("Adding Alarm "));
-            AddAlarm(delay);
-            break;
+    /*
+     * We need to check (reason == ER_OK) here because we should not be
+     * reloading the alarm if it has been triggered during the shutdown
+     * of the timer.
+     */
+    if (reason == ER_OK) {
+        while (true) {
+            uint64_t start = GetTimestamp64();
+            proximityScanner->Scan(request_scan);
+            ProcessScanResults();
+            uint32_t delay = ::max((uint64_t)0, SCAN_DELAY - (GetTimestamp64() - start));
+            if (delay > 0) {
+                //Add alarm with delay time to our main timer
+                QCC_DbgPrintf(("Adding Alarm "));
+                AddAlarm(delay);
+                break;
+            }
         }
     }
 }
@@ -420,14 +446,8 @@ void ProximityScanEngine::AlarmTriggered(const Alarm& alarm, QStatus reason)
 void ProximityScanEngine::StopScan() {
 
     QCC_DbgTrace(("ProximityScanEngine::StopScan() called"));
-    // RemoveTimers
-    if (tScan) {
-        if (mainTimer.HasAlarm(*tScan)) {
-            mainTimer.RemoveAlarm(*myListener, *tScan);
-        }
-        delete tScan;
-        tScan = NULL;
-    }
+    //LOGD("============== ProximityScanEngine::StopScan() called ================");
+    // RemoveAlarms and Stop and Join the mainTimer
     mainTimer.Stop();
     mainTimer.Join();
     hysteresisMap.clear();
@@ -454,16 +474,11 @@ void ProximityScanEngine::StartScan() {
 
     mainTimer.Start();
 
-    // Initialize the Alarm
-
-    uint32_t relativeTime = 5000;
-    uint32_t periodMs = 0;
-    myListener = this;
+    // Add an immediate fire alarm to the timer
+    uint32_t zero = 0;
     void* vptr = NULL;
-
-    // Add the alarm to the timer
-    this->tScan = new Alarm(relativeTime, myListener, vptr, periodMs);
-    mainTimer.AddAlarm(*this->tScan);
+    AlarmListener* myListener = this;
+    mainTimer.AddAlarm(Alarm(zero, myListener, vptr, zero));
 
 //    while (true) {
 //        if (!isFirstScanComplete) {

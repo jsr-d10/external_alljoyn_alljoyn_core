@@ -40,7 +40,7 @@
 #include <qcc/StringUtil.h>
 
 #include <Callback.h>
-#include <NameService.h>
+#include <ns/IpNameServiceImpl.h>
 #include <Transport.h>
 
 #include <Status.h>
@@ -49,7 +49,7 @@
 
 using namespace ajn;
 
-static NameService* g_ns;
+static IpNameServiceImpl* g_ns;
 
 /*
  * If true sniffs advertisements but doesn't send them.
@@ -70,7 +70,7 @@ const uint16_t TUNNEL_PORT = 9973;
 static void SigIntHandler(int sig)
 {
     if (g_ns) {
-        NameService* ns = g_ns;
+        IpNameServiceImpl* ns = g_ns;
         g_ns = NULL;
         ns->Stop();
     }
@@ -148,7 +148,7 @@ class AdvTunnel {
     /*
      * Maps from guid to name service
      */
-    std::map<qcc::String, NameService*> nsRelay;
+    std::map<qcc::String, IpNameServiceImpl*> nsRelay;
 };
 
 QStatus AdvTunnel::VersionExchange()
@@ -296,28 +296,30 @@ QStatus AdvTunnel::RelayAdv()
     /*
      * Lookup or create a name service for relaying advertisements for this quid
      */
-    NameService* ns;
+    IpNameServiceImpl* ns;
     if (nsRelay.count(guid) == 0) {
-        ns = new NameService();
-        status = ns->Init(guid, true, true, false);
+        ns = new IpNameServiceImpl();
+        status = ns->Init(guid);
+        if (status != ER_OK) {
+            delete ns;
+            return status;
+        }
+
+        status = ns->Start();
         if (status != ER_OK) {
             delete ns;
             return status;
         }
         nsRelay[guid] = ns;
         /*
-         * Parse out address and set it on the name service
+         * Parse out the port of the reliable TCP transport mechanism and set it
+         * on the name service
          */
         std::map<qcc::String, qcc::String> argMap;
         QStatus status = Transport::ParseArguments("tcp", busAddr.c_str(), argMap);
         if (status == ER_OK) {
-            qcc::IPAddress addr(argMap["addr"]);
-            uint16_t port = static_cast<uint16_t>(qcc::StringToU32(argMap["port"]));
-            if (addr.IsIPv4()) {
-                status = ns->SetEndpoints(addr.ToString(), "", (uint16_t)port);
-            } else {
-                status = ns->SetEndpoints("", addr.ToString(), (uint16_t)port);
-            }
+            uint16_t port = static_cast<uint16_t>(qcc::StringToU32(argMap["r4port"]));
+            status = ns->Enable(TRANSPORT_TCP, (uint16_t)port, 0, 0, 0);
             if (status == ER_OK) {
                 ns->OpenInterface("*");
             }
@@ -326,12 +328,12 @@ QStatus AdvTunnel::RelayAdv()
         ns = nsRelay[guid];
     }
     if (timer) {
-        status = ns->Advertise(nameList);
+        status = ns->AdvertiseName(TRANSPORT_TCP, nameList);
         if (status != ER_OK) {
             QCC_LogError(status, ("Failed to advertise relayed names"));
         }
     } else {
-        status = ns->Cancel(nameList);
+        status = ns->CancelAdvertiseName(TRANSPORT_TCP, nameList);
         if (status != ER_OK) {
             QCC_LogError(status, ("Failed to cancel relayed names"));
         }
@@ -408,7 +410,7 @@ static void usage(void)
 int main(int argc, char** argv)
 {
     QStatus status;
-    NameService ns;
+    IpNameServiceImpl ns;
     AdvTunnel tunnel;
     bool listen = false;
     qcc::String addr;
@@ -463,13 +465,14 @@ int main(int argc, char** argv)
     ns.SetCallback(new CallbackImpl<AdvTunnel, void, const qcc::String&, const qcc::String&, std::vector<qcc::String>&, uint8_t>
                        (&tunnel, &AdvTunnel::Found));
 
-    ns.Enable();
+    ns.Enable(TRANSPORT_TCP, port, 0, 0, 0);
 
     /*
      * In sniffMode we just report advertisements
      */
     if (sniffMode) {
-        ns.Init(guid, true, true, false);
+        ns.Init(guid);
+        ns.Start();
         ns.OpenInterface("*");
         ns.Locate("");
         printf("Started sniffing for advertised names\n");
@@ -488,7 +491,8 @@ int main(int argc, char** argv)
         } else {
             printf("Relay established\n");
 
-            ns.Init(guid, true, true, false);
+            ns.Init(guid);
+            ns.Start();
 
             ns.OpenInterface("*");
             ns.Locate("");

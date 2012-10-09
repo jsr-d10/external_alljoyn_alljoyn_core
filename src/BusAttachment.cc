@@ -28,6 +28,8 @@
 #include <qcc/XmlElement.h>
 #include <qcc/StringSource.h>
 #include <qcc/FileStream.h>
+#include <qcc/String.h>
+#include <qcc/StringUtil.h>
 
 #include <assert.h>
 #include <algorithm>
@@ -262,6 +264,12 @@ uint32_t BusAttachment::GetConcurrency()
 {
     return concurrency;
 }
+
+qcc::String BusAttachment::GetConnectSpec()
+{
+    return connectSpec;
+}
+
 
 QStatus BusAttachment::Start()
 {
@@ -1580,7 +1588,7 @@ QStatus BusAttachment::SetLinkTimeout(SessionId sessionId, uint32_t& linkTimeout
     return status;
 }
 
-void BusAttachment::Internal::LocalEndpointDisconnected()
+void BusAttachment::Internal::NonLocalEndpointDisconnected()
 {
     listenersLock.Lock(MUTEX_CONTEXT);
     ListenerSet::iterator it = listeners.begin();

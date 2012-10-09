@@ -37,6 +37,9 @@
 #include <Status.h>
 
 #include "TCPTransport.h"
+#if 0
+#include "wfd/WFDTransport.h"
+#endif
 #include "DaemonTransport.h"
 
 #if defined(QCC_OS_DARWIN)
@@ -421,7 +424,7 @@ int main(int argc, char** argv)
     Environ* env = Environ::GetAppEnviron();
 
 #ifdef QCC_OS_GROUP_WINDOWS
-    serverArgs = env->Find("BUS_SERVER_ADDRESSES", "localhost:port=9956;tcp:addr=0.0.0.0,port=9955,family=ipv4;bluetooth:");
+    serverArgs = env->Find("BUS_SERVER_ADDRESSES", "localhost:port=9956;tcp:addr=0.0.0.0,port=9955;bluetooth:");
 #else
 
 #if defined(DAEMON_LIB)
@@ -433,12 +436,12 @@ int main(int argc, char** argv)
      * to be relaxed to 666 to make this work for everyday apps.  We also let
      * the tcp listen spec default to listening and multicasting on all
      * adapters. */
-    serverArgs = env->Find("BUS_SERVER_ADDRESSES", "unix:abstract=alljoyn;tcp:family=ipv4");
+    serverArgs = env->Find("BUS_SERVER_ADDRESSES", "unix:abstract=alljoyn;tcp:");
 #else
     if (noBT) {
-        serverArgs = env->Find("BUS_SERVER_ADDRESSES", "unix:abstract=alljoyn;tcp:addr=0.0.0.0,port=9955,family=ipv4");
+        serverArgs = env->Find("BUS_SERVER_ADDRESSES", "unix:abstract=alljoyn;tcp:addr=0.0.0.0,port=9955");
     } else {
-        serverArgs = env->Find("BUS_SERVER_ADDRESSES", "unix:abstract=alljoyn;tcp:addr=0.0.0.0,port=9955,family=ipv4;bluetooth:");
+        serverArgs = env->Find("BUS_SERVER_ADDRESSES", "unix:abstract=alljoyn;tcp:addr=0.0.0.0,port=9955;bluetooth:");
     }
 
 #endif /* DAEMON_LIB */
@@ -446,19 +449,23 @@ int main(int argc, char** argv)
 #endif /* !QCC_OS_GROUP_WINDOWS */
 
     /*
-     * Teach the transport list how to make transports it may see referred to
-     * in the serverArgs above.  The daemon transport is created by default because
-     * it is always required. The other transports are only created if specified in
-     * the environment.
+     * Teach the transport list how to make transports it may see referred to in
+     * the serverArgs above.  The daemon transport is created by default (the
+     * isDefault parameter is "true") because it is always required. The other
+     * transport(s) are only created if specified in the environment as
+     * indicated in serverArgs.
      */
     TransportFactoryContainer cntr;
     cntr.Add(new TransportFactory<DaemonTransport>(DaemonTransport::TransportName, true));
-    cntr.Add(new TransportFactory<TCPTransport>("tcp", false));
+    cntr.Add(new TransportFactory<TCPTransport>(TCPTransport::TransportName, false));
+#if 0 && defined(QCC_OS_ANDROID)
+    cntr.Add(new TransportFactory<WFDTransport>(WFDTransport::TransportName, false));
+#endif
 
 #if !defined(QCC_OS_DARWIN)
 #if !defined(QCC_OS_GROUP_WINDOWS)
     if (!noBT) {
-        cntr.Add(new TransportFactory<BTTransport>("bluetooth", false));
+        cntr.Add(new TransportFactory<BTTransport>(BTTransport::TransportName, false));
     }
 #endif
 #endif

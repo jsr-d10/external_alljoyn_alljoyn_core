@@ -1,4 +1,4 @@
-AllJoyn version 3.1.0 README.TXT
+AllJoyn version 3.0.0 README.TXT
 --------------------------------
 
 Summary of file and directory structure:
@@ -27,9 +27,6 @@ Summary of file and directory structure:
             Bus client example.
         ./bin/bbservice
             Bus service example.
-
-    ./docs
-        AllJoyn C++ API (HTML documentation)
 
     ./docs
         AllJoyn C++ API (HTML documentation)
