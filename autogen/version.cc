@@ -25,11 +25,11 @@
 static const char product[] = "Alljoyn Library";
 static const unsigned int architecture = 3;
 static const unsigned int apiLevel = 0;
-static const unsigned int release = 1;
+static const unsigned int release = 2;
 
 
-static const char version[] = "v3.0.1";
-static const char build[] = "Alljoyn Library v3.0.1 (Built Sun Oct 07 18:03:56 UTC 2012 on sea-ajnu1010-b by seabuild)";
+static const char version[] = "v3.0.2";
+static const char build[] = "Alljoyn Library v3.0.2 (Built Tue Oct 30 02:10:24 UTC 2012 on sea-ajnu1010-a by seabuild)";
 
 const char * ajn::GetVersion()
 {

@@ -231,7 +231,49 @@ class RendezvousServerConnection {
      */
     void GetRendezvousConnIPAddresses(IPAddress& onDemandAddress, IPAddress& persistentAddress);
 
+    /**
+     * @internal
+     * @brief Return the IP address of the Rendezvous Server.
+     */
+    void GetRendezvousServerIPAddress(qcc::String& address) {
+        address = RendezvousServerIPAddress;
+    }
+
+    /**
+     * @internal
+     * @brief Set the IP address of the Rendezvous Server.
+     */
+    void SetRendezvousServerIPAddress(qcc::String& address) {
+        RendezvousServerIPAddress = address;
+    }
+
+    /**
+     * @internal
+     * @brief Returns true if the device has valid interfaces up for connection to the Server.
+     */
+    bool IsAnyNetworkInterfaceUp(void) {
+        if (networkInterface) {
+            return networkInterface->IsAnyNetworkInterfaceUp();
+        } else {
+            return false;
+        }
+    }
+
   private:
+
+    /* Default constructor */
+    RendezvousServerConnection();
+
+    /* Just defined to make klocwork happy. Should never be used */
+    RendezvousServerConnection(const RendezvousServerConnection& other) {
+        assert(false);
+    }
+
+    /* Just defined to make klocwork happy. Should never be used */
+    RendezvousServerConnection& operator=(const RendezvousServerConnection& other) {
+        assert(false);
+        return *this;
+    }
 
     /**
      * @internal
@@ -281,9 +323,15 @@ class RendezvousServerConnection {
 
     /**
      * @internal
-     * @brief Rendezvous Server address.
+     * @brief Rendezvous Server host name.
      */
     String RendezvousServer;
+
+    /**
+     * @internal
+     * @brief Rendezvous Server IP address.
+     */
+    String RendezvousServerIPAddress;
 
     /**
      * @internal

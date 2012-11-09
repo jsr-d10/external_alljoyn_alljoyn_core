@@ -27,6 +27,7 @@
 
 #include <qcc/Debug.h>
 #include <qcc/String.h>
+#include <qcc/StringUtil.h>
 #include <qcc/Environ.h>
 #include <qcc/Util.h>
 #include <qcc/Thread.h>
@@ -61,6 +62,7 @@ static bool s_noDestruct = false;
 static bool s_useMultipointSessions = true;
 static OperationMode s_operationMode;
 static volatile sig_atomic_t g_interrupt = false;
+static TransportMask s_transports = TRANSPORT_ANY;
 
 static void SigIntHandler(int sig)
 {
@@ -158,7 +160,7 @@ class ClientBusListener : public BusListener, public SessionListener {
 
             mutex.Lock();
             bool shouldReturn = wasNameFoundAlready;
-            wasNameFoundAlready = true;
+            if ((s_transports & transport) == transport) wasNameFoundAlready = true;
             mutex.Unlock();
 
             if (shouldReturn) {
@@ -166,10 +168,17 @@ class ClientBusListener : public BusListener, public SessionListener {
                 return;
             }
 
+            /* Only proceed further if we want to connect over the transport over which the FoundAdvertisedName
+             * was received */
+            if ((s_transports & transport) == 0) {
+                QCC_SyncPrintf("We are not interested in connecting over a transport with mask 0x%x.\n", transport);
+                return;
+            }
+
             /* Since we are in a callback we must enable concurrent callbacks before calling a synchronous method. */
             owner->bus->EnableConcurrentCallbacks();
 
-            SessionOpts opts(SessionOpts::TRAFFIC_MESSAGES, s_useMultipointSessions, SessionOpts::PROXIMITY_ANY, TRANSPORT_ANY);
+            SessionOpts opts(SessionOpts::TRAFFIC_MESSAGES, s_useMultipointSessions, SessionOpts::PROXIMITY_ANY, s_transports);
             QStatus status = owner->bus->JoinSession(name, SERVICE_PORT, this, owner->sessionId, opts);
             if (ER_OK != status) {
                 QCC_SyncPrintf("JoinSession to %s failed (status=%s)\n", name, QCC_StatusText(status));
@@ -247,7 +256,7 @@ inline void ThreadClass::DefaultRun() {
         QCC_LogError(status, ("RequestName(%s) failed.", name.c_str()));
     }
     /* Begin Advertising the well-known name */
-    status = bus->AdvertiseName(name.c_str(), TRANSPORT_ANY);
+    status = bus->AdvertiseName(name.c_str(), s_transports);
     if (ER_OK != status) {
         QCC_LogError(status, ("Could not advertise (%s)", name.c_str()));
     }
@@ -255,6 +264,16 @@ inline void ThreadClass::DefaultRun() {
     BusObject bo(*bus, "/org/cool");
     bus->RegisterBusObject(bo);
     bus->UnregisterBusObject(bo);
+    if (!s_noDestruct) {
+        /* Cancel Advertising the well-known name */
+        status = bus->CancelAdvertiseName(name.c_str(), s_transports);
+        if (ER_OK != status) {
+            QCC_LogError(status, ("Could not cancel advertising (%s)", name.c_str()));
+        }
+
+        delete bus;
+        bus = NULL;
+    }
 }
 
 inline void ThreadClass::ClientRun() {
@@ -318,8 +337,23 @@ inline void ThreadClass::ClientRun() {
 
     bus->LeaveSession(sessionId);
 
+    /* Cancel discovery on the well-known name of the service */
+    status = bus->CancelFindAdvertisedName(SERVICE_NAME);
+    if (status != ER_OK) {
+        QCC_SyncPrintf("org.alljoyn.Bus.CancelFindAdvertisedName failed (%s))\n", QCC_StatusText(status));
+    }
+
     if (clientBusListener) {
         bus->UnregisterBusListener(*clientBusListener);
+    }
+
+    if (!s_noDestruct) {
+        /* Delete BusAttachment before deleting clientBusListener */
+        delete bus;
+        bus = NULL;
+    }
+
+    if (clientBusListener) {
         delete clientBusListener;
         clientBusListener = NULL;
     }
@@ -382,7 +416,7 @@ inline void ThreadClass::ServiceRun() {
     }
 
     /* Create session */
-    SessionOpts opts(SessionOpts::TRAFFIC_MESSAGES, s_useMultipointSessions, SessionOpts::PROXIMITY_ANY, TRANSPORT_ANY);
+    SessionOpts opts(SessionOpts::TRAFFIC_MESSAGES, s_useMultipointSessions, SessionOpts::PROXIMITY_ANY, s_transports);
     if (ER_OK == status) {
         SessionPort sp = SERVICE_PORT;
         status = bus->BindSessionPort(sp, opts, *serviceBusListener);
@@ -421,6 +455,12 @@ inline void ThreadClass::ServiceRun() {
     QCC_SyncPrintf("Service named %s is stopping...\n", buf);
     QCC_SyncPrintf("------------------------------------------------------------\n");
 
+    /* Cancel Advertise name */
+    status = bus->CancelAdvertiseName(serviceName.c_str(), opts.transports);
+    if (status != ER_OK) {
+        QCC_SyncPrintf("Failed to cancel advertise name %s (%s)\n", serviceName.c_str(), QCC_StatusText(status));
+    }
+
     if (busObject) {
         bus->UnregisterBusObject(*busObject);
         delete busObject;
@@ -429,6 +469,15 @@ inline void ThreadClass::ServiceRun() {
 
     if (serviceBusListener) {
         bus->UnregisterBusListener(*serviceBusListener);
+    }
+
+    if (!s_noDestruct) {
+        /* Delete BusAttachment before deleting serviceBusListener */
+        delete bus;
+        bus = NULL;
+    }
+
+    if (serviceBusListener) {
         delete serviceBusListener;
         serviceBusListener = NULL;
     }
@@ -438,7 +487,10 @@ inline qcc::ThreadReturn STDCALL ThreadClass::Run(void* arg) {
 
     bus = new BusAttachment(name.c_str(), true);
     QStatus status =  bus->Start();
-
+    if (status != ER_OK) {
+        QCC_LogError(status, ("ThreadClass::Run failed"));
+        return this;
+    }
 
     /* Force bundled daemon */
     status = bus->Connect("null:");
@@ -451,11 +503,6 @@ inline qcc::ThreadReturn STDCALL ThreadClass::Run(void* arg) {
         ClientRun();
     } else if (s_operationMode == Service) {
         ServiceRun();
-    }
-
-    if (!s_noDestruct) {
-        delete bus;
-        bus = NULL;
     }
 
     return this;
@@ -473,6 +520,7 @@ static void usage(void)
     QCC_SyncPrintf("   -oc                   = Operate in client mode\n");
     QCC_SyncPrintf("   -os                   = Operate in service mode\n");
     QCC_SyncPrintf("   -p                    = Use point-to-point sessions, default is multipoint\n");
+    QCC_SyncPrintf("   -m <mask>             = Transport mask to use for client\n");
 }
 
 /** Main entry point */
@@ -514,6 +562,15 @@ int main(int argc, char**argv)
             s_operationMode = Service;
         } else if (0 == strcmp("-p", argv[i])) {
             s_useMultipointSessions = false;
+        } else if (0 == strcmp("-m", argv[i])) {
+            ++i;
+            if (i == argc) {
+                QCC_SyncPrintf("option %s requires a parameter\n", argv[i - 1]);
+                usage();
+                exit(1);
+            } else {
+                s_transports = static_cast<TransportMask>(StringToU32(argv[i], 16, TRANSPORT_ANY));
+            }
         } else {
             usage();
             exit(1);

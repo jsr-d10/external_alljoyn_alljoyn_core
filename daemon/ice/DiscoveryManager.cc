@@ -39,7 +39,6 @@
 #include <qcc/Util.h>
 #include <alljoyn/BusAttachment.h>
 
-
 #include "DiscoveryManager.h"
 #include "RendezvousServerInterface.h"
 #include "DaemonConfig.h"
@@ -85,6 +84,8 @@ DiscoveryManager::DiscoveryManager(BusAttachment& bus) :
     PeerID(),
     PeerAddr(),
     LastOnDemandMessageSent(NULL),
+    RendezvousServerIPAddress(),
+    LastDNSLookupTimeStamp(0),
     DiscoveryManagerState(IMPL_SHUTDOWN),
     PersistentIdentifier(),
     InterfaceFlags(NONE),
@@ -192,6 +193,106 @@ DiscoveryManager::DiscoveryManager(BusAttachment& bus) :
     clientLoginRemoteObj = new ProxyBusObject(bus, ClientLoginServiceName.c_str(), ClientLoginServiceObject.c_str(), 0);
 }
 
+DiscoveryManager::DiscoveryManager(const DiscoveryManager& other) :
+    bus(other.bus),
+    ClientLoginServiceName(other.ClientLoginServiceName),
+    ClientLoginServiceObject(other.ClientLoginServiceObject),
+    GetAccountNameMethod(other.GetAccountNameMethod),
+    GetAccountPasswordMethod(other.GetAccountPasswordMethod),
+    PeerID(other.PeerID),
+    PeerAddr(other.PeerAddr),
+    LastOnDemandMessageSent(NULL),
+    RendezvousServerIPAddress(other.RendezvousServerIPAddress),
+    LastDNSLookupTimeStamp(other.LastDNSLookupTimeStamp),
+    DiscoveryManagerState(other.DiscoveryManagerState),
+    PersistentIdentifier(other.PersistentIdentifier),
+    InterfaceFlags(other.InterfaceFlags),
+    Connection(NULL),
+    ConnectionAuthenticationComplete(other.ConnectionAuthenticationComplete),
+    iceCallback(NULL),
+    WakeEvent(Event::neverSet),
+    OnDemandResponseEvent(NULL),
+    PersistentResponseEvent(NULL),
+    ConnectionResetEvent(Event::neverSet),
+    DisconnectEvent(Event::neverSet),
+    ForceInterfaceUpdateFlag(other.ForceInterfaceUpdateFlag),
+    ClientAuthenticationRequiredFlag(other.ClientAuthenticationRequiredFlag),
+    UpdateInformationOnServerFlag(other.UpdateInformationOnServerFlag),
+    RendezvousSessionActiveFlag(other.RendezvousSessionActiveFlag),
+    RegisterDaemonWithServer(other.RegisterDaemonWithServer),
+    PersistentMessageSentTimeStamp(other.PersistentMessageSentTimeStamp),
+    OnDemandMessageSentTimeStamp(other.OnDemandMessageSentTimeStamp),
+    SentMessageOverOnDemandConnection(other.SentMessageOverOnDemandConnection),
+    LastSentUpdateMessage(other.LastSentUpdateMessage),
+    GETMessage(other.GETMessage),
+    RendezvousSessionDeleteMessage(other.RendezvousSessionDeleteMessage),
+    SCRAMAuthModule(),
+    ProximityScanner(NULL),
+    ClientAuthenticationFailed(other.ClientAuthenticationFailed),
+    DiscoveryManagerTimer("DiscoveryManagerTimer"),
+    InterfaceUpdateAlarm(NULL),
+    SentFirstGETMessage(other.SentFirstGETMessage),
+    userCredentials(),
+    UseHTTP(other.UseHTTP),
+    EnableIPv6(other.EnableIPv6),
+    clientLoginBusListener(NULL),
+    clientLoginRemoteObj(NULL)
+{
+    QCC_DbgPrintf(("DiscoveryManager::DiscoveryManager(): Copy constructor\n"));
+
+    /* This constructor should never be invoked */
+    assert(false);
+}
+
+DiscoveryManager& DiscoveryManager::operator=(const DiscoveryManager& other)
+{
+    QCC_DbgPrintf(("DiscoveryManager::DiscoveryManager(): operator=\n"));
+
+    /* This operator should never be invoked */
+    assert(false);
+
+    if (this != &other) {
+        ClientLoginServiceName = other.ClientLoginServiceName;
+        ClientLoginServiceObject = other.ClientLoginServiceObject;
+        GetAccountNameMethod = other.GetAccountNameMethod;
+        GetAccountPasswordMethod = other.GetAccountPasswordMethod;
+        PeerID = other.PeerID;
+        PeerAddr = other.PeerAddr;
+        LastOnDemandMessageSent = NULL;
+        RendezvousServerIPAddress = other.RendezvousServerIPAddress;
+        LastDNSLookupTimeStamp = other.LastDNSLookupTimeStamp;
+        DiscoveryManagerState = other.DiscoveryManagerState;
+        PersistentIdentifier = other.PersistentIdentifier;
+        InterfaceFlags = other.InterfaceFlags;
+        Connection = NULL;
+        ConnectionAuthenticationComplete = other.ConnectionAuthenticationComplete;
+        iceCallback = NULL;
+        OnDemandResponseEvent = NULL;
+        PersistentResponseEvent = NULL;
+        ForceInterfaceUpdateFlag = other.ForceInterfaceUpdateFlag;
+        ClientAuthenticationRequiredFlag = other.ClientAuthenticationRequiredFlag;
+        UpdateInformationOnServerFlag = other.UpdateInformationOnServerFlag;
+        RendezvousSessionActiveFlag = other.RendezvousSessionActiveFlag;
+        RegisterDaemonWithServer = other.RegisterDaemonWithServer;
+        PersistentMessageSentTimeStamp = other.PersistentMessageSentTimeStamp;
+        OnDemandMessageSentTimeStamp = other.OnDemandMessageSentTimeStamp;
+        SentMessageOverOnDemandConnection = other.SentMessageOverOnDemandConnection;
+        LastSentUpdateMessage = other.LastSentUpdateMessage;
+        GETMessage = other.GETMessage;
+        RendezvousSessionDeleteMessage = other.RendezvousSessionDeleteMessage;
+        ProximityScanner = NULL;
+        ClientAuthenticationFailed = other.ClientAuthenticationFailed;
+        InterfaceUpdateAlarm = NULL;
+        SentFirstGETMessage = other.SentFirstGETMessage;
+        UseHTTP = other.UseHTTP;
+        EnableIPv6 = other.EnableIPv6;
+        clientLoginBusListener = NULL;
+        clientLoginRemoteObj = NULL;
+    }
+
+    return *this;
+}
+
 DiscoveryManager::~DiscoveryManager()
 {
     QCC_DbgPrintf(("DiscoveryManager::~DiscoveryManager()\n"));
@@ -287,11 +388,20 @@ void DiscoveryManager::Disconnect(void)
         delete LastOnDemandMessageSent;
         LastOnDemandMessageSent = NULL;
     }
+
+    /* Send LostAdvertisedName for all discovered services because we'll ensure to send a Search
+     * Message again on a re-connect and get the latest set of advertisements. Also delete all
+     * active sessions */
+    DiscoveryManagerMutex.Lock(MUTEX_CONTEXT);
+    ResetDiscoveryState();
+    DiscoveryManagerMutex.Unlock(MUTEX_CONTEXT);
 }
 
 QStatus DiscoveryManager::Init(const String& guid)
 {
     QCC_DbgPrintf(("DiscoveryManager::Init()\n"));
+
+    QStatus status = ER_OK;
 
     //
     // Can only call Init() if the object is not running or in the process
@@ -305,13 +415,24 @@ QStatus DiscoveryManager::Init(const String& guid)
 
     PersistentIdentifier = guid;
 
-    assert(IsRunning() == false);
+    //
+    // Initialize and add the InterfaceUpdateAlarm to DiscoveryManagerTimer so that it fires periodically
+    //
+    uint32_t interfaceUpdateMinimumInterval = INTERFACE_UPDATE_MIN_INTERVAL;
+    qcc::AlarmListener* discoveryManagerListener = this;
+    void* context = NULL;
+    InterfaceUpdateAlarm = new Alarm(interfaceUpdateMinimumInterval, discoveryManagerListener, context, interfaceUpdateMinimumInterval);
+    status = DiscoveryManagerTimer.AddAlarm(*InterfaceUpdateAlarm);
 
-    Start(this);
+    if (status == ER_OK) {
+        assert(IsRunning() == false);
+        Start(this);
+        DiscoveryManagerState = IMPL_RUNNING;
+    } else {
+        QCC_LogError(status, ("%s: Unable to add the InterfaceUpdateAlarm to DiscoveryManagerTimer"));
+    }
 
-    DiscoveryManagerState = IMPL_RUNNING;
-
-    return ER_OK;
+    return status;
 }
 
 QStatus DiscoveryManager::OpenInterface(const String& name)
@@ -873,26 +994,77 @@ QStatus DiscoveryManager::Connect(void)
 
     QStatus status = ER_OK;
 
+    /* Set up or update the Connection only if we have active Advertisements or Searches */
+    if (((currentAdvertiseList.empty())) && ((currentSearchList.empty()))) {
+        status = ER_UNABLE_TO_CONNECT_TO_RENDEZVOUS_SERVER;
+        QCC_LogError(status, ("%s: Both the advertise and search list are empty. No need to setup a connection.", __FUNCTION__));
+        return status;
+    }
+
     if (InterfaceFlags == NetworkInterface::NONE) {
         status = ER_FAIL;
         QCC_LogError(status, ("DiscoveryManager::Connect(): InterfaceFlags = NONE"));
     } else {
         if (!(Connection)) {
             Connection = new RendezvousServerConnection(RendezvousServer, EnableIPv6, UseHTTP);
+
+            if (!Connection) {
+                status = ER_FAIL;
+                QCC_LogError(status, ("DiscoveryManager::Connect(): Unable to initialize Connection"));
+            }
         }
 
-        /* Set up or update the Persistent Connection if we have active Advertisements or Searches */
-        if (((!(currentAdvertiseList.empty()))) || ((!(currentSearchList.empty())))) {
+        if (Connection) {
+
+            /* If RendezvousServerIPAddress has a valid IP address, check if DNS_LOOKUP_INTERVAL_IN_MS has passed after
+             * the last DNS lookup. If it has, then we need to do DNS lookup again */
+            if (!RendezvousServerIPAddress.empty()) {
+                if ((GetTimestamp64() - LastDNSLookupTimeStamp) >= DNS_LOOKUP_INTERVAL_IN_MS) {
+                    QCC_DbgPrintf(("%s: Clear RendezvousServerIPAddress", __FUNCTION__));
+                    RendezvousServerIPAddress.clear();
+                }
+            }
+
+            Connection->SetRendezvousServerIPAddress(RendezvousServerIPAddress);
+
             RendezvousServerConnection::ConnectionFlag connFlag = RendezvousServerConnection::BOTH;
 
             status = Connection->Connect(InterfaceFlags, connFlag);
 
             if (status == ER_OK) {
                 QCC_DbgPrintf(("DiscoveryManager::Connect(): Successfully connected to the Rendezvous Server"));
+
+                /* If RendezvousServerIPAddress is empty, then we would have done a DNS lookup in this connect
+                 * attempt. Save off the looked up IP address in RendezvousServerIPAddress and also update
+                 * LastDNSLookupTimeStamp to point to the time now */
+                if (RendezvousServerIPAddress.empty()) {
+                    Connection->GetRendezvousServerIPAddress(RendezvousServerIPAddress);
+                    LastDNSLookupTimeStamp = GetTimestamp64();
+                    QCC_DbgPrintf(("%s: Setting RendezvousServerIPAddress %s", __FUNCTION__, RendezvousServerIPAddress.c_str()));
+                }
+
             } else {
                 status = ER_UNABLE_TO_CONNECT_TO_RENDEZVOUS_SERVER;
                 QCC_LogError(status, ("DiscoveryManager::Connect(): %s", QCC_StatusText(status)));
+
+                /* If we used the IP address value in RendezvousServerIPAddress for connecting to the server and we failed
+                 * to connect in-spite of a valid network interface being up, clear the value in RendezvousServerIPAddress
+                 * so that we perform a DNS lookup in the next connect attempt */
+                if (!RendezvousServerIPAddress.empty()) {
+                    if (Connection->IsAnyNetworkInterfaceUp()) {
+                        QCC_DbgPrintf(("%s: Clear RendezvousServerIPAddress", __FUNCTION__));
+                        RendezvousServerIPAddress.clear();
+                    }
+                }
             }
+        }
+    }
+
+    if (status != ER_OK) {
+        if (Connection) {
+            Connection->Disconnect();
+            delete Connection;
+            Connection = NULL;
         }
     }
 
@@ -914,8 +1086,6 @@ void* DiscoveryManager::Run(void* arg)
 
     vector<Event*> checkEvents, signaledEvents;
     uint32_t waitTimeout;
-
-    bool skipForceInterfaceUpdateFlagReset = false;
 
     //
     // Create a set of events to wait on.
@@ -954,6 +1124,10 @@ void* DiscoveryManager::Run(void* arg)
                 if (ForceInterfaceUpdateFlag || (!Connection)) {
 
                     QCC_DbgPrintf(("DiscoveryManager::Run(): ForceInterfaceUpdateFlag(%d)\n", ForceInterfaceUpdateFlag));
+
+                    /* Reset the ForceInterfaceUpdateFlag */
+                    ForceInterfaceUpdateFlag = false;
+
 
                     /**
                      * Unlock the mutex before the call to connect and lock it back later. This is required to ensure that we do not
@@ -1045,8 +1219,7 @@ void* DiscoveryManager::Run(void* arg)
                                 status = SendMessage(GETMessage);
 
                                 if (status != ER_OK) {
-                                    /* Disconnect from the Server and set skipForceInterfaceUpdateFlagReset so that we dont end up resetting
-                                     * the ForceInterfaceUpdateFlag */
+                                    /* Disconnect from the Server */
                                     Disconnect();
 #ifdef ENABLE_PROXIMITY_FRAMEWORK
                                     /* Release and acquire back the DiscoveryManagerMutex before call to StopScan
@@ -1059,7 +1232,6 @@ void* DiscoveryManager::Run(void* arg)
                                     }
                                     DiscoveryManagerMutex.Lock(MUTEX_CONTEXT);
 #endif
-                                    skipForceInterfaceUpdateFlagReset = true;
                                 } else {
                                     SentFirstGETMessage = true;
                                 }
@@ -1072,12 +1244,6 @@ void* DiscoveryManager::Run(void* arg)
                             delete Connection;
                             Connection = NULL;
                         }
-                    }
-
-                    if (!skipForceInterfaceUpdateFlagReset) {
-                        ForceInterfaceUpdateFlag = false;
-                    } else {
-                        skipForceInterfaceUpdateFlagReset = false;
                     }
                 }
 
@@ -1092,25 +1258,6 @@ void* DiscoveryManager::Run(void* arg)
                 if (!(Connection)) {
 
                     ClearOutboundMessageQueue();
-
-                    if (InterfaceUpdateAlarm) {
-                        DiscoveryManagerTimer.RemoveAlarm(*InterfaceUpdateAlarm);
-                        delete InterfaceUpdateAlarm;
-                        InterfaceUpdateAlarm = NULL;
-                    }
-
-                    uint32_t interfaceUpdateMinimumInterval = INTERFACE_UPDATE_MIN_INTERVAL;
-                    qcc::AlarmListener* discoveryManagerListener = this;
-                    void* context = NULL;
-                    uint32_t zero = 0;
-                    InterfaceUpdateAlarm = new Alarm(interfaceUpdateMinimumInterval, discoveryManagerListener, context, zero);
-                    status = DiscoveryManagerTimer.AddAlarm(*InterfaceUpdateAlarm);
-
-                    if (status != ER_OK) {
-                        /* We do not take any action if we are not able to add the alarm to the timer as if some issue comes up with the
-                         * connection we handle it resetting up the connection */
-                        QCC_LogError(status, ("DiscoveryManager::Run(): Unable to add InterfaceUpdateAlarm to DiscoveryManagerTimer"));
-                    }
 
 #ifdef ENABLE_PROXIMITY_FRAMEWORK
                     /* Release and acquire back the DiscoveryManagerMutex before call to StopScan
@@ -1136,8 +1283,9 @@ void* DiscoveryManager::Run(void* arg)
 
                                 if (status != ER_OK) {
 
-                                    /* Disconnect from the Server and set ForceInterfaceUpdateFlag */
+                                    /* Disconnect from the Server */
                                     Disconnect();
+
 #ifdef ENABLE_PROXIMITY_FRAMEWORK
                                     /* Release and acquire back the DiscoveryManagerMutex before call to StopScan
                                      * to ensure that there is no deadlock between the ProximityScanEngine
@@ -1149,9 +1297,6 @@ void* DiscoveryManager::Run(void* arg)
                                     }
                                     DiscoveryManagerMutex.Lock(MUTEX_CONTEXT);
 #endif
-
-                                    ForceInterfaceUpdateFlag = true;
-
                                 }
                             }
 
@@ -1163,7 +1308,7 @@ void* DiscoveryManager::Run(void* arg)
                                 status = SendMessage(GETMessage);
 
                                 if (status != ER_OK) {
-                                    /* Disconnect from the Server and set ForceInterfaceUpdateFlag */
+                                    /* Disconnect from the Server */
                                     Disconnect();
 #ifdef ENABLE_PROXIMITY_FRAMEWORK
                                     /* Release and acquire back the DiscoveryManagerMutex before call to StopScan
@@ -1176,7 +1321,6 @@ void* DiscoveryManager::Run(void* arg)
                                     }
                                     DiscoveryManagerMutex.Lock(MUTEX_CONTEXT);
 #endif
-                                    ForceInterfaceUpdateFlag = true;
                                 } else {
                                     SentFirstGETMessage = true;
                                 }
@@ -1188,7 +1332,7 @@ void* DiscoveryManager::Run(void* arg)
 
                                 if (status != ER_OK) {
 
-                                    /* Disconnect from the Server and set ForceInterfaceUpdateFlag */
+                                    /* Disconnect from the Server */
                                     Disconnect();
 
 #ifdef ENABLE_PROXIMITY_FRAMEWORK
@@ -1202,9 +1346,6 @@ void* DiscoveryManager::Run(void* arg)
                                     }
                                     DiscoveryManagerMutex.Lock(MUTEX_CONTEXT);
 #endif
-
-                                    ForceInterfaceUpdateFlag = true;
-
                                 } else {
                                     /* Clear the RegisterDaemonWithServer if we could send the Daemon Registration Message successfully to
                                      * the Server */
@@ -1230,13 +1371,12 @@ void* DiscoveryManager::Run(void* arg)
                                             UpdateInformationOnServerFlag = false;
                                         }
 
-                                        /* Set the wake event */
                                         WakeEvent.SetEvent();
                                     } else {
 
                                         UpdateInformationOnServerFlag = false;
 
-                                        /* Disconnect from the Server and set ForceInterfaceUpdateFlag */
+                                        /* Disconnect from the Server */
                                         Disconnect();
 
 #ifdef ENABLE_PROXIMITY_FRAMEWORK
@@ -1250,8 +1390,6 @@ void* DiscoveryManager::Run(void* arg)
                                         }
                                         DiscoveryManagerMutex.Lock(MUTEX_CONTEXT);
 #endif
-
-                                        ForceInterfaceUpdateFlag = true;
                                     }
 
                                 } else {
@@ -1272,12 +1410,12 @@ void* DiscoveryManager::Run(void* arg)
                                             status = SendMessage(*message);
 
                                             //
-                                            // If we are unable to send the message, disconnect from the Server and then set ForceInterfaceUpdateFlag.
+                                            // If we are unable to send the message, disconnect from the Server.
                                             //
                                             if (status != ER_OK) {
                                                 QCC_DbgPrintf(("DiscoveryManager::Run(): SendMessage was unsuccessful"));
 
-                                                /* Disconnect from the Server and set ForceInterfaceUpdateFlag */
+                                                /* Disconnect from the Server */
                                                 Disconnect();
 
 #ifdef ENABLE_PROXIMITY_FRAMEWORK
@@ -1291,8 +1429,6 @@ void* DiscoveryManager::Run(void* arg)
                                                 }
                                                 DiscoveryManagerMutex.Lock(MUTEX_CONTEXT);
 #endif
-                                                ForceInterfaceUpdateFlag = true;
-
                                             } else {
                                                 //
                                                 // The current message has been sent to the Rendezvous Server.
@@ -1443,8 +1579,6 @@ void* DiscoveryManager::Run(void* arg)
             }
 #endif
 
-            ForceInterfaceUpdateFlag = true;
-
             signaledEvents.clear();
         }
 
@@ -1504,10 +1638,6 @@ void* DiscoveryManager::Run(void* arg)
                 }
 #endif
 
-                // We just set ForceInterfaceUpdateFlag to true so that the loop handles the
-                // setting up of a new connection
-                ForceInterfaceUpdateFlag = true;
-
                 ConnectionResetEvent.ResetEvent();
 
             } else if (*i == &DisconnectEvent) {
@@ -1550,8 +1680,7 @@ void* DiscoveryManager::Run(void* arg)
 
                     } else {
 
-                        /* Something has gone wrong. So we disconnect and set the ForceInterfaceUpdateFlag */
-
+                        /* Something has gone wrong. So we disconnect. */
                         Disconnect();
 
 #ifdef ENABLE_PROXIMITY_FRAMEWORK
@@ -1560,8 +1689,6 @@ void* DiscoveryManager::Run(void* arg)
                             ProximityScanner->StopScan();
                         }
 #endif
-
-                        ForceInterfaceUpdateFlag = true;
 
                     }
 
@@ -1580,7 +1707,7 @@ void* DiscoveryManager::Run(void* arg)
 
                     } else {
 
-                        /* Something has gone wrong. So we disconnect and set the ForceInterfaceUpdateFlag */
+                        /* Something has gone wrong. So we disconnect. */
                         Disconnect();
 
 #ifdef ENABLE_PROXIMITY_FRAMEWORK
@@ -1589,8 +1716,6 @@ void* DiscoveryManager::Run(void* arg)
                             ProximityScanner->StopScan();
                         }
 #endif
-
-                        ForceInterfaceUpdateFlag = true;
 
                     }
                 }
@@ -1876,7 +2001,7 @@ QStatus DiscoveryManager::HandleMatchRevokedResponse(MatchRevokedResponse respon
         //
         if (iceCallback) {
 
-            QCC_DbgPrintf(("DiscoveryManager::PurgeNameMap(): Trying to invoke the iceCallback\n"));
+            QCC_DbgPrintf(("DiscoveryManager::HandleMatchRevokedResponse(): Trying to invoke the iceCallback\n"));
 
             (*iceCallback)(FOUND, response.peerAddr, NULL, 0);
         }
@@ -1922,7 +2047,7 @@ QStatus DiscoveryManager::HandleMatchRevokedResponse(MatchRevokedResponse respon
 
                                 if (*services_it == tempList.front()) {
                                     remoteDaemonServices_it->services.erase(services_it);
-                                    QCC_DbgPrintf(("DiscoveryManager::HandleSearchMatchResponse(): The service %s with GUID %s has been removed from searchMap\n",
+                                    QCC_DbgPrintf(("DiscoveryManager::HandleMatchRevokedResponse(): The service %s with GUID %s has been removed from searchMap\n",
                                                    tempList.front().c_str(), response.peerAddr.c_str()));
                                     // Break out of the remoteDaemonServices_it->services for loop
                                     break;
@@ -1962,6 +2087,44 @@ QStatus DiscoveryManager::HandleMatchRevokedResponse(MatchRevokedResponse respon
     }
 
     return status;
+}
+
+void DiscoveryManager::ResetDiscoveryState(void)
+{
+
+    QCC_DbgPrintf(("%s: Trying to invoke found callback to record unavailability of all previously available services", __FUNCTION__));
+
+    // Remove the discovered entries from the searchMap
+    map<String, SearchResponseInfo>::iterator it;
+    for (it = searchMap.begin(); it != searchMap.end(); ++it) {
+        it->second.response.clear();
+    }
+
+    // Clear the lastSentSearchList so that the Run() thread will re-send the Search to the RDVZ server on a reconnect
+    lastSentSearchList.clear();
+
+    list<String> guid;
+
+    std::map<String, RemoteDaemonStunInfo>::iterator sit;
+    for (sit = StunAndTurnServerInfo.begin(); sit != StunAndTurnServerInfo.end(); ++sit) {
+        guid.push_back(sit->first);
+    }
+
+    StunAndTurnServerInfo.clear();
+
+    while (!guid.empty()) {
+        //
+        // Invoke the found callback to purge the nameMap
+        //
+        if (iceCallback) {
+
+            QCC_DbgPrintf(("%s: Trying to invoke the iceCallback\n", __FUNCTION__));
+
+            (*iceCallback)(FOUND, guid.front(), NULL, 0);
+        }
+
+        guid.pop_front();
+    }
 }
 
 QStatus DiscoveryManager::HandleAddressCandidatesResponse(AddressCandidatesResponse response)
@@ -2162,8 +2325,6 @@ void DiscoveryManager::HandlePersistentConnectionResponse(HttpConnection::HTTPRe
                     ProximityScanner->StopScan();
                 }
 #endif
-
-                ForceInterfaceUpdateFlag = true;
             }
 
         }
@@ -2183,8 +2344,6 @@ void DiscoveryManager::HandlePersistentConnectionResponse(HttpConnection::HTTPRe
                 ProximityScanner->StopScan();
             }
 #endif
-
-            ForceInterfaceUpdateFlag = true;
         }
 
     } else if (response.statusCode == HttpConnection::HTTP_UNAUTHORIZED_REQUEST) {
@@ -2205,7 +2364,6 @@ void DiscoveryManager::HandlePersistentConnectionResponse(HttpConnection::HTTPRe
 
             /* We need to re-authenticate with the Server */
             ClientAuthenticationRequiredFlag = true;
-            ForceInterfaceUpdateFlag = true;
         }
 
     } else {
@@ -2222,25 +2380,6 @@ void DiscoveryManager::HandlePersistentConnectionResponse(HttpConnection::HTTPRe
             ProximityScanner->StopScan();
         }
 #endif
-
-        if (InterfaceUpdateAlarm) {
-            DiscoveryManagerTimer.RemoveAlarm(*InterfaceUpdateAlarm);
-            delete InterfaceUpdateAlarm;
-            InterfaceUpdateAlarm = NULL;
-        }
-
-        uint32_t interfaceUpdateMinimumInterval = INTERFACE_UPDATE_MIN_INTERVAL;
-        qcc::AlarmListener* discoveryManagerListener = this;
-        void* context = NULL;
-        uint32_t zero = 0;
-        InterfaceUpdateAlarm = new Alarm(interfaceUpdateMinimumInterval, discoveryManagerListener, context, zero);
-        status = DiscoveryManagerTimer.AddAlarm(*InterfaceUpdateAlarm);
-
-        if (status != ER_OK) {
-            /* We do not take any action if we are not able to add the alarm to the timer as if some issue comes up with the
-             * connection we handle it resetting up the connection */
-            QCC_LogError(status, ("DiscoveryManager::HandlePersistentConnectionResponse(): Unable to add InterfaceUpdateAlarm to DiscoveryManagerTimer"));
-        }
     }
 }
 
@@ -2518,8 +2657,6 @@ void DiscoveryManager::HandleOnDemandConnectionResponse(HttpConnection::HTTPResp
                         ProximityScanner->StopScan();
                     }
 #endif
-
-                    ForceInterfaceUpdateFlag = true;
                 }
             } else if (LastOnDemandMessageSent && (LastOnDemandMessageSent->messageType == TOKEN_REFRESH)) {
                 status = HandleTokenRefreshResponse(response.payload);
@@ -2533,8 +2670,6 @@ void DiscoveryManager::HandleOnDemandConnectionResponse(HttpConnection::HTTPResp
                         ProximityScanner->StopScan();
                     }
 #endif
-
-                    ForceInterfaceUpdateFlag = true;
                 }
             } else {
 
@@ -2549,8 +2684,6 @@ void DiscoveryManager::HandleOnDemandConnectionResponse(HttpConnection::HTTPResp
                         ProximityScanner->StopScan();
                     }
 #endif
-
-                    ForceInterfaceUpdateFlag = true;
                 }
 
             }
@@ -2574,8 +2707,6 @@ void DiscoveryManager::HandleOnDemandConnectionResponse(HttpConnection::HTTPResp
                     ProximityScanner->StopScan();
                 }
 #endif
-
-                ForceInterfaceUpdateFlag = true;
             }
         }
 
@@ -2597,19 +2728,6 @@ void DiscoveryManager::HandleOnDemandConnectionResponse(HttpConnection::HTTPResp
 
             /* We need to re-authenticate with the Server */
             ClientAuthenticationRequiredFlag = true;
-
-            if (InterfaceUpdateAlarm) {
-                DiscoveryManagerTimer.RemoveAlarm(*InterfaceUpdateAlarm);
-                delete InterfaceUpdateAlarm;
-                InterfaceUpdateAlarm = NULL;
-            }
-
-            uint32_t interfaceUpdateMinimumInterval = INTERFACE_UPDATE_MIN_INTERVAL;
-            qcc::AlarmListener* discoveryManagerListener = this;
-            void* context = NULL;
-            uint32_t zero = 0;
-            InterfaceUpdateAlarm = new Alarm(interfaceUpdateMinimumInterval, discoveryManagerListener, context, zero);
-            status = DiscoveryManagerTimer.AddAlarm(*InterfaceUpdateAlarm);
         }
 
     } else {
@@ -2626,25 +2744,6 @@ void DiscoveryManager::HandleOnDemandConnectionResponse(HttpConnection::HTTPResp
             ProximityScanner->StopScan();
         }
 #endif
-
-        if (InterfaceUpdateAlarm) {
-            DiscoveryManagerTimer.RemoveAlarm(*InterfaceUpdateAlarm);
-            delete InterfaceUpdateAlarm;
-            InterfaceUpdateAlarm = NULL;
-        }
-
-        uint32_t interfaceUpdateMinimumInterval = INTERFACE_UPDATE_MIN_INTERVAL;
-        qcc::AlarmListener* discoveryManagerListener = this;
-        void* context = NULL;
-        uint32_t zero = 0;
-        InterfaceUpdateAlarm = new Alarm(interfaceUpdateMinimumInterval, discoveryManagerListener, context, zero);
-        status = DiscoveryManagerTimer.AddAlarm(*InterfaceUpdateAlarm);
-
-        if (status != ER_OK) {
-            /* We do not take any action if we are not able to add the alarm to the timer as if some issue comes up with the
-             * connection we handle it resetting up the connection */
-            QCC_LogError(status, ("DiscoveryManager::HandleOnDemandConnectionResponse(): Unable to add InterfaceUpdateAlarm to DiscoveryManagerTimer"));
-        }
     }
 
     /* Reset SentMessageOverOnDemandConnection to indicate that we received a response */

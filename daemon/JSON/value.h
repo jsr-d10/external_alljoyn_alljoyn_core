@@ -428,10 +428,12 @@ class JSON_API Value {
     struct CommentInfo {
         CommentInfo();
         ~CommentInfo();
+        CommentInfo(const CommentInfo& other);
+        CommentInfo& operator=(const CommentInfo& other);
 
         void setComment(const char*text);
 
-        char*comment_;
+        char* comment_;
     };
 
     //struct MemberNamesTransform
@@ -448,12 +450,12 @@ class JSON_API Value {
         UInt uint_;
         double real_;
         bool bool_;
-        char*string_;
+        char* string_;
 # ifdef JSON_VALUE_USE_INTERNAL_MAP
         ValueInternalArray*array_;
         ValueInternalMap*map_;
 #else
-        ObjectValues*map_;
+        ObjectValues* map_;
 # endif
     } value_;
     ValueType type_ : 8;

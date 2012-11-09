@@ -521,6 +521,13 @@ class DiscoveryManager : public Thread, public AlarmListener {
 
     /**
      * @internal
+     * @brief Clear the StunAndTurnServerInfo and all found advertisements from the
+     * searchMap and inform AllJoynObj about the same.
+     */
+    void ResetDiscoveryState(void);
+
+    /**
+     * @internal
      * @brief Handle the Address Candidates Response message.
      */
     QStatus HandleAddressCandidatesResponse(AddressCandidatesResponse response);
@@ -659,6 +666,21 @@ class DiscoveryManager : public Thread, public AlarmListener {
     void ClearOutboundMessageQueue(void);
 
   private:
+    /**
+     * @internal
+     *
+     * @brief Copy constructor
+     * This is just a dummy constructor to make klocwork happy
+     */
+    DiscoveryManager(const DiscoveryManager& other);
+
+    /**
+     * @internal
+     *
+     * @brief Assignment operator
+     * This is just a dummy definition to make klocwork happy
+     */
+    DiscoveryManager& operator=(const DiscoveryManager& other);
 
     /**
      * @internal
@@ -676,7 +698,6 @@ class DiscoveryManager : public Thread, public AlarmListener {
      * The modulus indicating the minimum time between interface updates.
      * Units are milli seconds.
      */
-    /*PPN - Review duration*/
     static const uint32_t INTERFACE_UPDATE_MIN_INTERVAL = 180000;
 
     /**
@@ -700,6 +721,15 @@ class DiscoveryManager : public Thread, public AlarmListener {
      * at T_KEEP_ALIVE_IN_MS
      */
     static const uint32_t T_KEEP_ALIVE_BUFFER_MULTIPLE = 2;
+
+    /**
+     * @internal
+     *
+     * @brief Time period after which the cached IP address of the RDVZ server will be cleared and new
+     * DNS lookup would be performed on the server host name. Current setting is 24 Hours i.e.
+     * (24 * 60 * 60 * 1000)ms
+     */
+    static const uint32_t DNS_LOOKUP_INTERVAL_IN_MS = 24 * 60 * 60 * 1000;
 
     /**
      * @internal
@@ -753,9 +783,23 @@ class DiscoveryManager : public Thread, public AlarmListener {
     /**
      * @internal
      *
-     * @brief Rendezvous server address.
+     * @brief Rendezvous server host name.
      */
     String RendezvousServer;
+
+    /**
+     * @internal
+     *
+     * @brief Rendezvous server IP address.
+     */
+    String RendezvousServerIPAddress;
+
+    /**
+     * @internal
+     *
+     * @brief Time stamp of the instance when a DNS lookup was last done on the Server host name.
+     */
+    uint64_t LastDNSLookupTimeStamp;
 
     /* Map of the all the sessions that have been initiated by the AllJoyn client attached to this daemon*/
     multimap<String, SessionEntry> OutgoingICESessions;

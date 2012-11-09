@@ -65,23 +65,35 @@ STUNSocketStream::STUNSocketStream(const STUNSocketStream& other) :
 
 STUNSocketStream STUNSocketStream::operator=(const STUNSocketStream& other)
 {
-    Close();
-    isConnected = other.isConnected;
-    stunPtr = other.stunPtr;
-    sock = CopySock(other.sock);
-    delete sourceEvent;
-    sourceEvent = new Event(sock, Event::IO_READ, false);
-    delete sinkEvent;
-    sinkEvent = new Event(*sourceEvent, Event::IO_WRITE, false);
-    isDetached = other.isDetached;
+    if (this != &other) {
+        Close();
+        isConnected = other.isConnected;
+        stunPtr = other.stunPtr;
+        sock = CopySock(other.sock);
+        if (sourceEvent) {
+            delete sourceEvent;
+            sourceEvent = NULL;
+        }
+        sourceEvent = new Event(sock, Event::IO_READ, false);
+        if (sinkEvent) {
+            delete sinkEvent;
+            sinkEvent = NULL;
+        }
+        sinkEvent = new Event(*sourceEvent, Event::IO_WRITE, false);
+        isDetached = other.isDetached;
+    }
     return *this;
 }
 
 STUNSocketStream::~STUNSocketStream()
 {
     Close();
-    delete sourceEvent;
-    delete sinkEvent;
+    if (sourceEvent) {
+        delete sourceEvent;
+    }
+    if (sinkEvent) {
+        delete sinkEvent;
+    }
 }
 
 void STUNSocketStream::Close()

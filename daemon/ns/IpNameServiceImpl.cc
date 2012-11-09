@@ -281,6 +281,39 @@ namespace ajn {
 //
 const char* IpNameServiceImpl::INTERFACES_WILDCARD = "*";
 
+//
+// Define WORKAROUND_2_3_BUG to send name service messages over the old site
+// administered addresses to work around a forward compatibility bug introduced
+// in version 2.3 daemons.  They neglect to join the new IANA assigned multicast
+// groups and so cannot receive advertisements on those groups.  In order to
+// workaround this problem, we send version zero name service messages over the
+// old groups.  The old versions can send new IANA multicast group messages so
+// we can receive advertisements from them.  They just can't hear our new
+// messages
+//
+#define WORKAROUND_2_3_BUG 0
+#if WORKAROUND_2_3_BUG
+
+//
+// This is just a random IPv4 multicast group chosen out of the defined site
+// administered block of addresses.  This was a temporary choice while an IANA
+// reservation was in process, and remains for backward compatibility.
+//
+const char* IpNameServiceImpl::IPV4_MULTICAST_GROUP = "239.255.37.41";
+
+//
+// This is an IPv6 version of the temporary IPv4 multicast address described
+// above.  IPv6 multicast groups are composed of a prefix containing 0xff and
+// then flags (4 bits) followed by the IPv6 Scope (4 bits) and finally the IPv4
+// group, as in "ff03::239.255.37.41".  The Scope corresponding to the IPv4
+// Local Scope group is defined to be "3" by RFC 2365.  Unfortunately, the
+// qcc::IPAddress code can't deal with "ff03::239.255.37.41" so we have to
+// translate it.
+//
+const char* IpNameServiceImpl::IPV6_MULTICAST_GROUP = "ff03::efff:2529";
+
+#endif
+
 #if 1
 //
 // This is the IANA assigned IPv4 multicast group for AllJoyn.  This is
@@ -1037,14 +1070,22 @@ void IpNameServiceImpl::LazyUpdateInterfaces(void)
         // to do.  The See the Long Sidebar above.
         //
         if (entries[i].m_family == qcc::QCC_AF_INET) {
+#ifndef QCC_OS_WINRT
             status = qcc::Bind(sockFd, qcc::IPAddress("0.0.0.0"), MULTICAST_PORT);
+#else
+            status = qcc::Bind(sockFd, qcc::IPAddress(entries[i].m_addr), MULTICAST_PORT);
+#endif
             if (status != ER_OK) {
                 QCC_LogError(status, ("IpNameServiceImpl::LazyUpdateInterfaces(): bind(0.0.0.0) failed"));
                 qcc::Close(sockFd);
                 continue;
             }
         } else if (entries[i].m_family == qcc::QCC_AF_INET6) {
+#ifndef QCC_OS_WINRT
             status = qcc::Bind(sockFd, qcc::IPAddress("::"), MULTICAST_PORT);
+#else
+            status = qcc::Bind(sockFd, qcc::IPAddress(entries[i].m_addr), MULTICAST_PORT);
+#endif
             if (status != ER_OK) {
                 QCC_LogError(status, ("IpNameServiceImpl::LazyUpdateInterfaces(): bind(::) failed"));
                 qcc::Close(sockFd);
@@ -1193,7 +1234,7 @@ QStatus IpNameServiceImpl::Locate(const qcc::String& wkn, LocatePolicy policy)
         whoHas.AddName(wkn);
 
         Header header;
-        whoHas.SetVersion(0, 0);
+        header.SetVersion(0, 0);
         header.SetTimer(m_tDuration);
         header.AddQuestion(whoHas);
 
@@ -1222,7 +1263,6 @@ QStatus IpNameServiceImpl::Locate(const qcc::String& wkn, LocatePolicy policy)
         // are sending a version one message;
         //
         whoHas.SetVersion(1, 1);
-
         whoHas.AddName(wkn);
 
         Header header;
@@ -1444,8 +1484,6 @@ QStatus IpNameServiceImpl::AdvertiseName(TransportMask transportMask, vector<qcc
         // are sending a version one message;
         //
         isAt.SetVersion(1, 1);
-
-        isAt.SetTransportMask(transportMask);
 
         //
         // Version one allows us to provide four possible endpoints.
@@ -1877,6 +1915,9 @@ void IpNameServiceImpl::SendProtocolMessage(
     }
 #endif
 
+    uint32_t nsVersion, msgVersion;
+    header.GetVersion(nsVersion, msgVersion);
+
     size_t size = header.GetSerializedSize();
 
     if (size > NS_MESSAGE_MAX) {
@@ -1904,6 +1945,19 @@ void IpNameServiceImpl::SendProtocolMessage(
         //
 #if 1
         if (flags & qcc::IfConfigEntry::MULTICAST) {
+
+#if WORKAROUND_2_3_BUG
+
+            if (msgVersion == 0) {
+                QCC_DbgPrintf(("IpNameServiceImpl::SendProtocolMessage():  Sending to IPv4 Site Administered multicast group"));
+                qcc::IPAddress ipv4SiteAdminMulticast(IPV4_MULTICAST_GROUP);
+                QStatus status = qcc::SendTo(sockFd, ipv4SiteAdminMulticast, MULTICAST_PORT, buffer, size, sent);
+                if (status != ER_OK) {
+                    QCC_LogError(ER_FAIL, ("IpNameServiceImpl::SendProtocolMessage():  Error sending to IPv4 Site Administered multicast group"));
+                }
+            }
+#endif
+
             QCC_DbgPrintf(("IpNameServiceImpl::SendProtocolMessage():  Sending to IPv4 Local Network Control Block multicast group"));
             qcc::IPAddress ipv4LocalMulticast(IPV4_ALLJOYN_MULTICAST_GROUP);
             QStatus status = qcc::SendTo(sockFd, ipv4LocalMulticast, MULTICAST_PORT, buffer, size, sent);
@@ -1967,6 +2021,19 @@ void IpNameServiceImpl::SendProtocolMessage(
         }
     } else {
         if (flags & qcc::IfConfigEntry::MULTICAST) {
+
+#if WORKAROUND_2_3_BUG
+
+            if (msgVersion == 0) {
+                QCC_DbgPrintf(("IpNameServiceImpl::SendProtocolMessage():  Sending to IPv6 Site Administered multicast group"));
+                qcc::IPAddress ipv6SiteAdmin(IPV6_MULTICAST_GROUP);
+                QStatus status = qcc::SendTo(sockFd, ipv6SiteAdmin, MULTICAST_PORT, buffer, size, sent);
+                if (status != ER_OK) {
+                    QCC_LogError(ER_FAIL, ("IpNameServiceImpl::SendProtocolMessage():  Error sending to IPv6 Site Administered multicast group "));
+                }
+            }
+#endif
+
             QCC_DbgPrintf(("IpNameServiceImpl::SendProtocolMessage():  Sending to IPv6 Link-Local Scope multicast group"));
             qcc::IPAddress ipv6AllJoyn(IPV6_ALLJOYN_MULTICAST_GROUP);
             QStatus status = qcc::SendTo(sockFd, ipv6AllJoyn, MULTICAST_PORT, buffer, size, sent);
@@ -2132,8 +2199,8 @@ void IpNameServiceImpl::SendOutboundMessages(void)
                         isAt->SetVersion(1, 1);
 
                         //
-                        // XXX This is bogus.
-                        // How do we really keep track of this?
+                        // This is only valid until version 3.1 introduces new
+                        // transports that use the IP name service.
                         //
                         isAt->SetTransportMask(TRANSPORT_TCP);
                         isAt->ClearReliableIPv4();
@@ -3240,9 +3307,9 @@ QStatus IpNameServiceImpl::Start()
     m_mutex.Lock();
     assert(IsRunning() == false);
     QCC_DbgPrintf(("IpNameServiceImpl::Start(): Starting thread"));
+    m_state = IMPL_RUNNING;
     QStatus status = Thread::Start(this);
     QCC_DbgPrintf(("IpNameServiceImpl::Start(): Started"));
-    m_state = IMPL_RUNNING;
     m_mutex.Unlock();
     return status;
 }
