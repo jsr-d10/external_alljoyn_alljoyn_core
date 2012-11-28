@@ -9,7 +9,6 @@ LOCAL_CPP_EXTENSION := .cc
 LOCAL_SDK_VERSION := 8
 LOCAL_NDK_VERSION := 6
 LOCAL_NDK_STL_VARIANT := gnustl_static
-#LOCAL_ALLOW_UNDEFINED_SYMBOLS := true
 
 LOCAL_CFLAGS += \
 	-DQCC_CPU_ARM \
@@ -17,17 +16,12 @@ LOCAL_CFLAGS += \
 	-DQCC_OS_GROUP_POSIX \
 	-D_GLIBCXX_PERMIT_BACKWARD_HASH
 
-alljoyn_ndk_source_root := $(HISTORICAL_NDK_VERSIONS_ROOT)/android-ndk-r$(LOCAL_NDK_VERSION)/sources
-#alljoyn_ndk_source_root := $(HISTORICAL_NDK_VERSIONS_ROOT)/android-ndk-r5/sources
-
 LOCAL_C_INCLUDES := \
 	external/alljoyn/common/inc \
 	external/alljoyn/alljoyn_core/inc \
 	external/alljoyn/alljoyn_core/src \
 	external/alljoyn/alljoyn_core/autogen \
-	external/openssl/include \
-	$(alljoyn_ndk_source_root)/cxx-stl/gnu-libstdc++/libs/$(TARGET_CPU_ABI)/include \
-	$(alljoyn_ndk_source_root)/cxx-stl/gnu-libstdc++/include
+	external/openssl/include 
 
 LOCAL_SRC_FILES := \
 	../common/src/ASN1.cc \
@@ -139,8 +133,8 @@ include $(CLEAR_VARS)
 
 LOCAL_CPP_EXTENSION := .cc
 
-#LOCAL_SDK_VERSION := 8
-#LOCAL_NDK_VERSION := 5
+LOCAL_SDK_VERSION := 8
+LOCAL_NDK_STL_VARIANT := gnustl_static
 
 LOCAL_CFLAGS += \
 	-DQCC_CPU_ARM \
@@ -148,7 +142,6 @@ LOCAL_CFLAGS += \
 	-DQCC_OS_GROUP_POSIX \
 	-D_GLIBCXX_PERMIT_BACKWARD_HASH
 
-#alljoyn_ndk_source_root := $(HISTORICAL_NDK_VERSIONS_ROOT)/android-ndk-r$(LOCAL_NDK_VERSION)/sources
 alljoyn_ndk_source_root := $(HISTORICAL_NDK_VERSIONS_ROOT)/android-ndk-r6/sources
 
 LOCAL_C_INCLUDES := \
@@ -252,10 +245,6 @@ LOCAL_REQUIRED_MODULES := \
 	external/openssl/crypto/libcrypto \
 	external/openssl/ssl/libssl
 
-#LOCAL_LDLIBS := \
-#	-L$(alljoyn_ndk_source_root)/cxx-stl/gnu-libstdc++/libs/$(TARGET_CPU_ABI) \
-#	-lgnustl_static
-
 LOCAL_MODULE_PATH := $(TARGET_OUT_OPTIONAL_EXECUTABLES)
 LOCAL_MODULE_TAGS := optional
 LOCAL_MODULE := alljoyn-daemon
@@ -284,7 +273,6 @@ LOCAL_C_INCLUDES := \
 	external/alljoyn/alljoyn_core/JSON \
 	external/alljoyn/common/inc \
 	external/alljoyn/common/inc/qcc \
-	external/connectivity/stlport/stlport \
 	external/openssl/include \
 
 LOCAL_SRC_FILES := \
@@ -299,8 +287,7 @@ LOCAL_SHARED_LIBRARIES := \
 LOCAL_REQUIRED_MODULES := \
 	external/alljoyn/alljoyn_core/liballjoyn \
 	external/openssl/crypto/libcrypto \
-	external/openssl/ssl/libssl \
-	external/connectivity/stlport
+	external/openssl/ssl/libssl
 
 LOCAL_MODULE_TAGS := optional
 LOCAL_MODULE := libAllJoynAndroidExt
@@ -331,7 +318,6 @@ LOCAL_C_INCLUDES := \
 	external/alljoyn/alljoyn_core/JSON \
 	external/alljoyn/common/inc \
 	external/alljoyn/common/inc/qcc \
-	external/connectivity/stlport/stlport \
 	external/openssl/include \
 
 LOCAL_SRC_FILES := \
@@ -346,8 +332,7 @@ LOCAL_SHARED_LIBRARIES := \
 LOCAL_REQUIRED_MODULES := \
 	external/alljoyn/alljoyn_core/liballjoyn \
 	external/openssl/crypto/libcrypto \
-	external/openssl/ssl/libssl \
-	external/connectivity/stlport
+	external/openssl/ssl/libssl
 
 LOCAL_MODULE_TAGS := optional
 LOCAL_MODULE := libP2pHelperService
